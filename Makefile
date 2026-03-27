@@ -13,3 +13,5 @@ lib/cpachecker:
 	mv lib/CPAchecker-* lib/cpachecker
 	rm lib/cpachecker.zip
 
+setup: lib/pip lib/cpachecker
+

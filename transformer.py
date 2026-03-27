@@ -201,20 +201,26 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                 stmt.name = new
                 self._rename_type(stmt.type, new)
 
-                # move declaration to global scope
-                init = stmt.init
-                stmt.init = None
-                self.global_decls.append(stmt)
+                # For struct/union types, keep initializer on the declaration.
+                # For other types, move initializer to a separate assignment.
+                if self._is_struct_or_union_type(stmt.type):
+                    # Keep initializer with the declaration for structs/unions
+                    self.global_decls.append(stmt)
+                else:
+                    # Move initializer to assignment for scalar types
+                    init = stmt.init
+                    stmt.init = None
+                    self.global_decls.append(stmt)
 
-                # keep initializer as assignment
-                if init is not None:
-                    new_block_items.append(
-                        c_ast.Assignment(
-                            op='=',
-                            lvalue=c_ast.ID(name=new),
-                            rvalue=init
+                    # keep initializer as assignment
+                    if init is not None:
+                        new_block_items.append(
+                            c_ast.Assignment(
+                                op='=',
+                                lvalue=c_ast.ID(name=new),
+                                rvalue=init
+                            )
                         )
-                    )
 
             else:
                 self.visit(stmt)
@@ -289,18 +295,23 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             decl.name = new
             self._rename_type(decl.type, new)
 
-            init = decl.init
-            decl.init = None
-            self.global_decls.append(decl)
-
-            if init is not None:
-                node.init = c_ast.Assignment(
-                    op='=',
-                    lvalue=c_ast.ID(name=new),
-                    rvalue=init
-                )
-            else:
+            # For struct/union types, keep initializer on declaration
+            if self._is_struct_or_union_type(decl.type):
+                self.global_decls.append(decl)
                 node.init = c_ast.EmptyStatement()
+            else:
+                init = decl.init
+                decl.init = None
+                self.global_decls.append(decl)
+
+                if init is not None:
+                    node.init = c_ast.Assignment(
+                        op='=',
+                        lvalue=c_ast.ID(name=new),
+                        rvalue=init
+                    )
+                else:
+                    node.init = c_ast.EmptyStatement()
 
         else:
             if node.init:
@@ -339,11 +350,23 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
     # ---------- Struct ----------
     def visit_Struct(self, node):
         # Struct names (e.g. "Point" in "struct Point { ... }") must NEVER be renamed.
-        # Only visit the field declarations, keeping field names unchanged (in_struct would prevent
-        # any unwanted renaming anyway, but this visitor ensures clarity).
-        if node.decls:
-            for decl in node.decls:
-                self.visit(decl)
+        # DO NOT visit struct field declarations at all - they are part of the struct type definition
+        # and should never be globalized or have their names changed.
+        pass
+
+    # ---------- Union ----------
+    def visit_Union(self, node):
+        # Union names and field declarations must NEVER be renamed or globalized.
+        # Field names are part of the union definition, not variable references.
+        pass
+
+    # ---------- StructRef ----------
+    def visit_StructRef(self, node):
+        # In a struct reference like "p.x", only globalize the VARIABLE NAME (p),
+        # NEVER the FIELD NAME (x). Field names are part of the struct definition,
+        # not variable references.
+        # Only visit the variable being accessed; do NOT visit the field.
+        self.visit(node.name)
 
     # ---------- Identifier ----------
     def visit_ID(self, node):
@@ -355,6 +378,13 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             typ.declname = new_name
         elif hasattr(typ, "type"):
             self._rename_type(typ.type, new_name)
+
+    def _is_struct_or_union_type(self, decl_type):
+        """Check if a declaration type is a struct or union."""
+        if isinstance(decl_type, c_ast.TypeDecl):
+            inner_type = decl_type.type
+            return isinstance(inner_type, (c_ast.Struct, c_ast.Union))
+        return False
 
 
 class PrefixTransformer(c_ast.NodeVisitor):
@@ -430,14 +460,14 @@ class PrefixTransformer(c_ast.NodeVisitor):
 
     def visit_Struct(self, node):
         # Struct names (e.g. "Point" in "struct Point { ... }") must NEVER be renamed.
-        # When visiting field declarations inside the struct, set in_struct=1 to prevent
-        # accidentally renaming the field names themselves (renaming only variable names,
-        # not struct definition member names).
-        self.in_struct += 1
-        if node.decls:
-            for decl in node.decls:
-                self.visit(decl)
-        self.in_struct -= 1
+        # DO NOT visit struct field declarations at all - they are part of the struct type definition
+        # and field names should never be changed.
+        pass
+
+    def visit_Union(self, node):
+        # Union names and field declarations must NEVER be renamed.
+        # Field names are part of the union definition, not variable references.
+        pass
 
     def visit_StructRef(self, node):
         # Visit the struct variable being accessed (e.g. "p" in "p.x"),

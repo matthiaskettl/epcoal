@@ -120,6 +120,10 @@ class GlobalVariableExtractor(c_ast.NodeVisitor):
     def visit_FileAST(self, node):
         for ext in node.ext:
             if isinstance(ext, c_ast.Decl) and not isinstance(ext.type, c_ast.FuncDecl):
+                if not ext.name:
+                    # Anonymous declarations cannot be matched across files by name.
+                    logger.debug("Skipping anonymous global declaration during extraction")
+                    continue
                 self.global_vars[ext.name] = ext
                 
                 # Check if initialized with nondet call
@@ -240,6 +244,14 @@ class Merger:
             raise
 
         self.generator = GnuCGenerator()
+
+    def _strip_prefix(self, name, prefix):
+        """Strip a known prefix if present; otherwise return name unchanged."""
+        if not isinstance(name, str):
+            return name
+        if prefix and isinstance(prefix, str) and name.startswith(prefix):
+            return name[len(prefix):]
+        return name
 
     def merge(self):
         """
@@ -451,19 +463,43 @@ class Merger:
         Returns list of tuples: (var_name_in_file1, var_name_in_file2, decl1)
         """
         var_pairs = []
+        unmatched_left = []
+        matched_right = set()
 
         # Try to match by stripping prefixes
         for name1, decl1 in globals1.items():
-            # Try to find matching variable in file2
-            if name1.startswith(self.prefix1):
-                base_name = name1[len(self.prefix1) :]
-            else:
-                base_name = name1
+            if not isinstance(name1, str):
+                unmatched_left.append(str(name1))
+                continue
+
+            # Try to find matching variable in file2.
+            base_name = self._strip_prefix(name1, self.prefix1)
+            if not isinstance(base_name, str):
+                unmatched_left.append(str(name1))
+                continue
 
             expected_name2 = f"{self.prefix2}{base_name}"
 
             if expected_name2 in globals2:
                 var_pairs.append((name1, expected_name2, decl1))
+                matched_right.add(expected_name2)
+            else:
+                unmatched_left.append(name1)
+
+        if unmatched_left:
+            logger.info(
+                "No matching candidate in second file for %d globals (skipping): %s",
+                len(unmatched_left),
+                ", ".join(unmatched_left),
+            )
+
+        unmatched_right = [name for name in globals2.keys() if name not in matched_right]
+        if unmatched_right:
+            logger.info(
+                "No matching candidate in first file for %d globals (skipping): %s",
+                len(unmatched_right),
+                ", ".join(unmatched_right),
+            )
 
         return var_pairs
 
@@ -473,7 +509,7 @@ class Merger:
         checks = []
 
         for var1, _var2, decl1 in var_pairs:
-            base_name = var1[len(self.prefix1):]
+            base_name = self._strip_prefix(var1, self.prefix1)
 
             check_stmt = builder.build_assert_equal(base_name, decl1.type)
             checks.append(check_stmt)
@@ -498,7 +534,7 @@ class Merger:
         if nondet_pairs:
             for _, var1, var2 in nondet_pairs:
                 # Extract base name for pure function
-                base_name = var1[len(self.prefix1):]
+                base_name = self._strip_prefix(var1, self.prefix1)
                 pure_func_name = f"__pure_{base_name}"
                 # Call pure function with post-increment counter for both variables
                 pure_assignments.append(f"{var1} = {pure_func_name}(__invocation_count++);")
@@ -543,7 +579,7 @@ class Merger:
         # Process global nondet pairs
         for nondet_type, var1, var2 in nondet_pairs:
             # Extract base name from var1 (strip prefix)
-            base_name = var1[len(self.prefix1):]
+            base_name = self._strip_prefix(var1, self.prefix1)
             seen_bases[base_name] = nondet_type
         
         # Process function body nondet calls (these use the full variable name directly)

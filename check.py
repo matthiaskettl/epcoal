@@ -37,7 +37,7 @@ def main():
         description="Transform original/mutant C files, merge them, and run CPAchecker."
     )
     parser.add_argument("original", help="Path to original C file")
-    parser.add_argument("mutant", help="Path to mutant C file")
+    parser.add_argument("--mutant", help="Path to mutant C file", required=True)
     parser.add_argument(
         "--workdir",
         default=str(Path(__file__).resolve().parent),
