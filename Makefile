@@ -15,3 +15,13 @@ lib/cpachecker:
 
 setup: lib/pip lib/cpachecker
 
+prepare-benchexec:
+	rm -rf benchmark/benchexec
+	git -C benchmark clone https://github.com/sosy-lab/benchexec
+	cp lib/epcoal.py benchmark/benchexec/benchexec/tools/epcoal.py
+
+prepare-bench-defs:
+	@if [ ! -d benchmark/sv-benchmarks ]; then echo "Error: benchmark/sv-benchmarks not found"; exit 1; fi
+	find benchmark/ -name "*.csv" -exec ./benchmark/generate.py {} --output {}.xml \;
+
+prepare-benchmarks: prepare-benchexec prepare-bench-defs
