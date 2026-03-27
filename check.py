@@ -44,6 +44,13 @@ def main():
         help="Working directory containing transformer.py and merge.py",
     )
     parser.add_argument(
+        "--datamodel",
+        type=int,
+        choices=[32, 64],
+        default=32,
+        help="Data model of the input program (32 or 64 bit)",
+    )
+    parser.add_argument(
         "--cpachecker",
         default=str((Path(__file__).resolve().parent / "lib" / "cpachecker" / "bin" / "cpachecker").resolve()),
         help="Path to CPAchecker executable",
@@ -131,6 +138,7 @@ def main():
     result = run_command(
         [
             str(cpachecker),
+            "--32" if args.datamodel == 32 else "--64",
             "--spec",
             "sv-comp-reachability",
             str(merged_out),
