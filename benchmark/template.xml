@@ -7,6 +7,10 @@
   <!-- DEFINITIONS-->
 
   <columns>
-    <column title="UsedConfig">Used algorithm property</column>
+    <column title="original">[timing] transform original: </column>
+    <column title="mutant">[timing] transform mutant: </column>
+    <column title="merge">[timing] merge: </column>
+    <column title="cpachecker">[timing] cpachecker: </column>
+    <column title="total">[timing] total: </column>
   </columns>
 </benchmark>
