@@ -1,10 +1,12 @@
 extern void abort(void);
 
+void reach_error() {  }
+
 int x;
 
 int test() {
   x++;
-  abort();
+  reach_error();
 }
 
 int main() {
