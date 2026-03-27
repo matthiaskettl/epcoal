@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 RUN_DEFINITION_TEMPLATE = """  <rundefinition name=\"COUNT\">
-  <requiredfiles>MUTANT</requiredfiles>
+  <requiredfiles>benchmark/MUTANT</requiredfiles>
   <option name=\"--mutant\">MUTANT</option>
   <tasks>
     <include>ORIG</include>
@@ -22,6 +22,13 @@ RUN_DEFINITION_TEMPLATE = """  <rundefinition name=\"COUNT\">
 
 DEFINITIONS_MARKER = "  <!-- DEFINITIONS-->"
 ORIGINAL_PREFIX = "sv-benchmarks/"
+
+
+def _normalize_header(name: str) -> str:
+  """Normalize a CSV header to a canonical key."""
+  if name is None:
+    return ""
+  return name.strip().lstrip("\ufeff").lower()
 
 
 def _strip_original_prefix(original_path: str) -> str:
@@ -79,18 +86,38 @@ def create_run_definitions(csv_path: Path) -> str:
   """Build one XML run definition per CSV row."""
   blocks: list[str] = []
 
-  with csv_path.open(newline="", encoding="utf-8") as handle:
-    reader = csv.DictReader(handle)
+  with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+    # Read a sample for dialect sniffing, then reset stream position.
+    sample = handle.read(4096)
+    handle.seek(0)
+
+    try:
+      dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+    except csv.Error:
+      dialect = csv.excel
+
+    reader = csv.DictReader(handle, dialect=dialect)
 
     required_columns = {"original_path", "mutant_path"}
-    if not reader.fieldnames or not required_columns.issubset(reader.fieldnames):
+    raw_fieldnames = reader.fieldnames or []
+    normalized_fieldnames = [_normalize_header(name) for name in raw_fieldnames]
+
+    index_by_name = {
+      normalized: idx for idx, normalized in enumerate(normalized_fieldnames) if normalized
+    }
+
+    if not required_columns.issubset(index_by_name.keys()):
       raise ValueError(
-        "CSV must contain header columns: original_path,mutant_path"
+        "CSV must contain header columns: original_path,mutant_path "
+        f"(found: {raw_fieldnames})"
       )
 
+    original_key = raw_fieldnames[index_by_name["original_path"]]
+    mutant_key = raw_fieldnames[index_by_name["mutant_path"]]
+
     for count, row in enumerate(reader, start=1):
-      original_path = (row.get("original_path") or "").strip()
-      mutant_path = (row.get("mutant_path") or "").strip()
+      original_path = (row.get(original_key) or "").strip()
+      mutant_path = (row.get(mutant_key) or "").strip()
 
       if not original_path or not mutant_path:
         raise ValueError(

@@ -22,6 +22,6 @@ prepare-benchexec:
 
 prepare-bench-defs:
 	@if [ ! -d benchmark/sv-benchmarks ]; then echo "Error: benchmark/sv-benchmarks not found"; exit 1; fi
-	find benchmark/ -name "*.csv" -exec ./benchmark/generate.py {} --output {}.xml \;
+	find benchmark/ -maxdepth 1 -name "*.csv" -exec ./benchmark/generate.py {} --output {}.xml \;
 
 prepare-benchmarks: prepare-benchexec prepare-bench-defs
