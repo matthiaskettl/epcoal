@@ -45,7 +45,7 @@ def main():
     )
     parser.add_argument(
         "--cpachecker",
-        default=str((Path(__file__).resolve().parent / ".." / "cpachecker" / "bin" / "cpachecker").resolve()),
+        default=str((Path(__file__).resolve().parent / "lib" / "cpachecker" / "bin" / "cpachecker").resolve()),
         help="Path to CPAchecker executable",
     )
     parser.add_argument("--output-dir", default="output", help="Directory for generated files")

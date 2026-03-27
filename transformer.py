@@ -9,11 +9,19 @@ from pathlib import Path
 sys.path.append(str((Path(__file__).absolute().parent / "lib" / "pip")))
 
 
-from pycparserext.ext_c_parser import GnuCParser
+from pycparserext.ext_c_parser import GnuCParser, FuncDeclExt
 from pycparserext.ext_c_generator import GnuCGenerator
 from pycparser import c_ast
 
 logger = logging.getLogger(__name__)
+
+
+def _is_func_decl_type(node_type):
+    return isinstance(node_type, (c_ast.FuncDecl, FuncDeclExt))
+
+
+def _is_func_decl_node(node):
+    return isinstance(node, c_ast.Decl) and _is_func_decl_type(node.type)
 
 
 class ReachErrorTransformer(c_ast.NodeVisitor):
@@ -125,7 +133,7 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
         self.current_params = set()
 
         # Register function parameters so they are never globalized as locals.
-        if isinstance(node.decl, c_ast.Decl) and isinstance(node.decl.type, c_ast.FuncDecl):
+        if isinstance(node.decl, c_ast.Decl) and _is_func_decl_type(node.decl.type):
             args = node.decl.type.args
             if args and args.params:
                 for param in args.params:
@@ -160,7 +168,7 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                 continue
 
             # Handle variable declarations
-            if isinstance(stmt, c_ast.Decl) and not isinstance(stmt.type, c_ast.FuncDecl):
+            if isinstance(stmt, c_ast.Decl) and not _is_func_decl_type(stmt.type):
                 old = stmt.name
 
                 # Keep function parameter declarations untouched (e.g., K&R style param decls
@@ -341,11 +349,12 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
 
 
 class PrefixTransformer(c_ast.NodeVisitor):
-    def __init__(self, prefix):
+    def __init__(self, prefix, original_global_names=None):
         self.prefix = prefix
         self.scopes = [{}]
         self.function_names = {}
         self.in_struct = 0
+        self.original_global_names = set(original_global_names or [])
 
     def push_scope(self):
         self.scopes.append({})
@@ -375,10 +384,11 @@ class PrefixTransformer(c_ast.NodeVisitor):
                 old = ext.decl.name
                 self.function_names[old] = self._prefixed(old)
 
-        # Visit all nodes EXCEPT external function declarations
+        # Visit all nodes EXCEPT extern declarations and external function declarations.
         for ext in node.ext:
-            # Skip external function declarations (Decl with FuncDecl type) - keep them as-is
-            if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl):
+            if isinstance(ext, c_ast.Decl) and (
+                "extern" in (ext.storage or []) or _is_func_decl_type(ext.type)
+            ):
                 continue
             # Visit everything else (global vars, function definitions, etc.)
             self.visit(ext)
@@ -421,13 +431,22 @@ class PrefixTransformer(c_ast.NodeVisitor):
         self.visit(node.name)
 
     def visit_Decl(self, node):
+        # Never rename extern declarations.
+        if "extern" in (node.storage or []):
+            return
+
         if node.name is not None:
-            if isinstance(node.type, c_ast.FuncDecl):
+            if _is_func_decl_type(node.type):
                 node.name = self.function_names.get(node.name, self._prefixed(node.name))
                 self._rename_type(node.type, node.name)
             elif self.in_struct == 0:
                 old = node.name
-                new = self._prefixed(old)
+                # Distinguish original translation-unit globals from globalized locals.
+                is_file_scope = len(self.scopes) == 1
+                if is_file_scope and old in self.original_global_names:
+                    new = self._prefixed(f"global_{old}")
+                else:
+                    new = self._prefixed(old)
                 self.scopes[-1][old] = new
                 node.name = new
                 self._rename_type(node.type, new)
@@ -474,19 +493,30 @@ class Transformer:
         reach_error_transformer = ReachErrorTransformer()
         reach_error_transformer.visit(self.ast)
 
+        # Capture original translation-unit globals so they can be renamed as prefix_global_<name>.
+        original_global_names = set()
+        for ext in self.ast.ext:
+            if isinstance(ext, c_ast.Decl) and not _is_func_decl_type(ext.type):
+                if ext.name and "extern" not in (ext.storage or []):
+                    original_global_names.add(ext.name)
+
         # Globalize local variables
         t = GlobalizeTransformer()
         t.visit(self.ast)
 
         # Separate external function declarations from other nodes
         external_func_decls = []
+        original_global_decls = []
         func_defs = []
         passthrough_nodes = []
         
         for ext in self.ast.ext:
             # External function declarations (Decl with FuncDecl type)
-            if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl):
+            if _is_func_decl_node(ext):
                 external_func_decls.append(ext)
+            # Preserve original file-scope globals from input program.
+            elif isinstance(ext, c_ast.Decl):
+                original_global_decls.append(ext)
             # Function definitions
             elif isinstance(ext, c_ast.FuncDef):
                 func_defs.append(ext)
@@ -498,11 +528,18 @@ class Transformer:
                 passthrough_nodes.append(ext)
             # Skip other Decl nodes - they're local variables that got globalized
 
-        # Reconstruct: externals, typedefs, globals, passthrough nodes, then functions
-        self.ast.ext = external_func_decls + t.typedef_decls + t.global_decls + passthrough_nodes + func_defs
+        # Reconstruct: externals, typedefs, original globals, globalized locals, passthrough, then functions
+        self.ast.ext = (
+            external_func_decls
+            + t.typedef_decls
+            + original_global_decls
+            + t.global_decls
+            + passthrough_nodes
+            + func_defs
+        )
 
         if self.prefix:
-            prefix_transformer = PrefixTransformer(self.prefix)
+            prefix_transformer = PrefixTransformer(self.prefix, original_global_names=original_global_names)
             prefix_transformer.visit(self.ast)
 
         return self.generator.visit(self.ast)

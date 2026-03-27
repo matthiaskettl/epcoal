@@ -437,7 +437,7 @@ class Merger:
     def _remove_nondet_initializers(self, ext_list, nondet_pairs):
         """Remove initializers from globals that will be assigned in main."""
         nondet_vars_to_clear = set()
-        for _nondet_type, var1, var2 in nondet_pairs:
+        for _, var1, var2 in nondet_pairs:
             nondet_vars_to_clear.add(var1)
             nondet_vars_to_clear.add(var2)
 
@@ -496,7 +496,7 @@ class Merger:
         # Build pure function assignments using shared invocation counter
         pure_assignments = []
         if nondet_pairs:
-            for nondet_type, var1, var2 in nondet_pairs:
+            for _, var1, var2 in nondet_pairs:
                 # Extract base name for pure function
                 base_name = var1[len(self.prefix1):]
                 pure_func_name = f"__pure_{base_name}"

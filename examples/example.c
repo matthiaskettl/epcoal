@@ -1,5 +1,7 @@
 extern int __VERIFIER_nondet_int();
 
+int x = 0;
+
 void reach_error() {  }
 
 int alpha(int x) {

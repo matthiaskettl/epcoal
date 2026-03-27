@@ -1,5 +1,7 @@
 extern int __VERIFIER_nondet_int();
 
+int x = 0;
+
 void reach_error() {  }
 
 int alpha(int x) {
@@ -10,6 +12,7 @@ int alpha(int x) {
 }
 
 int main() {
+  x++;
   int x = __VERIFIER_nondet_int();
   alpha(x);
   if (__VERIFIER_nondet_int()) x++;
