@@ -214,6 +214,8 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
 
                     # keep initializer as assignment
                     if init is not None:
+                        # Rewrite IDs in initializer based on the current scope mapping.
+                        self.visit(init)
                         new_block_items.append(
                             c_ast.Assignment(
                                 op='=',
@@ -305,6 +307,8 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                 self.global_decls.append(decl)
 
                 if init is not None:
+                    # Rewrite IDs in initializer based on the current scope mapping.
+                    self.visit(init)
                     node.init = c_ast.Assignment(
                         op='=',
                         lvalue=c_ast.ID(name=new),

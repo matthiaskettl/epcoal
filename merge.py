@@ -217,6 +217,30 @@ class NondetCallReplacer(c_ast.NodeVisitor):
         return var_name
 
 
+class TerminationCallReplacer(c_ast.NodeVisitor):
+    """Replace terminating function calls with __noop()."""
+
+    TERMINATING_NAMES = {
+        "abort",
+        "exit",
+        "_Exit",
+        "quick_exit",
+        "__assert_fail",
+        "__assert",
+        "__assert_perror_fail",
+        "__builtin_trap",
+    }
+
+    def visit_FuncCall(self, node):
+        # First recurse so nested calls get rewritten as well.
+        self.generic_visit(node)
+
+        if isinstance(node.name, c_ast.ID) and node.name.name in self.TERMINATING_NAMES:
+            logger.debug("Replaced terminating call `%s` with __noop()", node.name.name)
+            node.name = c_ast.ID("__noop")
+            node.args = None
+
+
 class Merger:
     def __init__(self, file1_path, prefix1, file2_path, prefix2):
         self.file1_path = Path(file1_path)
@@ -289,9 +313,13 @@ class Merger:
         # Create merged AST: concatenate both ASTs
         merged_ext = list(self.ast1.ext) + list(self.ast2.ext)
 
+        # Replace terminating calls with __noop() so verification continues.
+        termination_replacer = TerminationCallReplacer()
+        merged_ast_temp = c_ast.FileAST(merged_ext)
+        termination_replacer.visit(merged_ast_temp)
+
         # Replace all __VERIFIER_nondet_X() calls in function bodies with pure function calls
         replacer = NondetCallReplacer(self.prefix1, self.prefix2)
-        merged_ast_temp = c_ast.FileAST(merged_ext)
         replacer.visit(merged_ast_temp)
         logger.info(f"Found and replaced {len(replacer.nondet_calls_found)} __VERIFIER_nondet calls in function bodies")
         
@@ -314,6 +342,9 @@ class Merger:
 
         # Ensure reach_error function is present
         self._add_reach_error_if_missing(merged_ext)
+
+        # Ensure __noop function is present for replaced terminating calls
+        self._add_noop_if_missing(merged_ext)
 
         # Create new main function
         new_main = self._create_merged_main(check_code, nondet_pairs)
@@ -679,6 +710,24 @@ class Merger:
             logger.info("Added reach_error() function at top of merged code")
         except Exception as e:
             logger.warning(f"Could not add reach_error function: {e}")
+
+    def _add_noop_if_missing(self, ext_list):
+        """Add __noop function with empty body at top if not already present."""
+        for ext in ext_list:
+            if isinstance(ext, c_ast.FuncDef) and ext.decl.name == "__noop":
+                return
+            if isinstance(ext, c_ast.Decl) and ext.name == "__noop":
+                return
+
+        parser = GnuCParser()
+        noop_code = "void __noop() { }"
+        try:
+            parsed = parser.parse(noop_code)
+            noop_func = parsed.ext[0]
+            ext_list.insert(0, noop_func)
+            logger.info("Added __noop() function at top of merged code")
+        except Exception as e:
+            logger.warning(f"Could not add __noop function: {e}")
 
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
