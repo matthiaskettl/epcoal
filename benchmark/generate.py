@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Generate BenchExec run definitions from a CSV and inject them into template.xml.
 
 CSV format:
@@ -32,8 +33,8 @@ def _strip_original_prefix(original_path: str) -> str:
 def find_yaml_for_original(original_path: str) -> str:
   """Find a YAML file in the original's directory that references the original file."""
   relative_original = _strip_original_prefix(original_path)
-  original_file = Path(ORIGINAL_PREFIX) / relative_original
-  original_name = original_file.name
+  original_file = Path(__file__).parent / Path(ORIGINAL_PREFIX) / relative_original
+  original_name = original_file.with_suffix("").name
 
   if not original_file.parent.is_dir():
     raise FileNotFoundError(
@@ -63,8 +64,9 @@ def find_yaml_for_original(original_path: str) -> str:
       continue
 
     content = candidate.read_text(encoding="utf-8", errors="ignore")
+    
     if original_name in content or relative_original in content:
-      rel_candidate = candidate.relative_to(Path(ORIGINAL_PREFIX))
+      rel_candidate = candidate.relative_to( Path(__file__).parent / Path(ORIGINAL_PREFIX))
       return f"{ORIGINAL_PREFIX}{rel_candidate.as_posix()}"
 
   raise FileNotFoundError(
@@ -133,7 +135,7 @@ def main() -> None:
   parser.add_argument(
     "--template",
     type=Path,
-    default=Path("template.xml"),
+    default=Path(__file__).parent / "template.xml",
     help="Template XML file that contains the DEFINITIONS marker",
   )
   parser.add_argument(
