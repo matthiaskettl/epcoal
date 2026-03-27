@@ -54,7 +54,7 @@ class Tool(BaseTool2):
     def determine_result(self, run):
         for line in reversed(run.output):
             if "Final verdict: equivalent" in line:
-                return benchexec.result.RESULT_DONE + "(equivalent)"
+                return benchexec.result.RESULT_DONE + " (equivalent)"
             if "Final verdict: not equivalent" in line:
-                return benchexec.result.RESULT_DONE + "(not equivalent)"
-        return benchexec.result.RESULT_DONE + "(unknown)"
+                return benchexec.result.RESULT_DONE + " (not equivalent)"
+        return benchexec.result.RESULT_DONE + " (unknown)"

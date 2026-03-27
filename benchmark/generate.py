@@ -13,8 +13,8 @@ from pathlib import Path
 
 
 RUN_DEFINITION_TEMPLATE = """  <rundefinition name=\"COUNT\">
-  <requiredfiles>benchmark/MUTANT</requiredfiles>
-  <option name=\"--mutant\">MUTANT</option>
+  <requiredfiles>MUTANT</requiredfiles>
+  <option name=\"--mutant\">benchmark/MUTANT</option>
   <tasks>
     <include>ORIG</include>
   </tasks>
