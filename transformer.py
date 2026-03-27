@@ -5,6 +5,7 @@ import argparse
 import logging
 import re
 from pathlib import Path
+from typing import AnyStr
 
 sys.path.append(str((Path(__file__).absolute().parent / "lib" / "pip")))
 
@@ -14,6 +15,74 @@ from pycparserext.ext_c_generator import GnuCGenerator
 from pycparser import c_ast
 
 logger = logging.getLogger(__name__)
+
+
+def blank(pattern: str, string: str, add_newline=False):
+    """
+    Blanks out the given pattern in the string.
+    :param pattern: The pattern to be blanked out.
+    :param string: the string to be modified.
+    :param add_newline: Whether to add a newline at the end of the string.
+    :return: The modified string.
+    """
+    res = re.search(pattern, string)
+    if not res:
+        return string
+    matchsize = len(res.group(0))
+    blanked_line = re.sub(pattern, " " * matchsize, string)
+    if add_newline:
+        blanked_line += "\n"
+    return blanked_line
+
+
+def rewrite_cproblem_pycparserext(content: str) -> str:
+    """
+    Rewrites the given content to be compatible with pycparserext.
+    This is necessary, since some special GNU C extension are not supported by pycparserext
+    :param content: The content to be rewritten.
+    :return: The rewritten content.
+    """
+    # TODO: This should be rewritten to be used inside pycparserext
+    prepared_content = ""
+    for line in [c + "\n" for c in content.split("\n")]:
+        line = re.sub(r"__signed__", "  signed  ", line)
+        line = blank(r"__attribute__\s*\(\s*\(\s*__always_inline__\s*\)\s*\)", line)
+        line = re.sub(
+            r"\*(.*) __attribute__\s*\(\s*\(\s*__aligned__"
+            r"\s*\([\sa-zA-Z0-9()|<>+*-]*\)\s*\)\s*\)\s*",
+            r"*\1",
+            line,
+        )
+        line = blank(r"__extension__", line)
+        prepared_content += line
+    return prepared_content
+
+
+def remove_comments(content: str):
+    """
+    Removes C/c++ style comments from the given content.
+    :param content: The content to remove comments from.
+    :return: The content without C/C++ style comments
+    """
+    in_cxx_comment = False
+    prepared_content = ""
+    line: AnyStr  # pylance runs into performance issues without this hint
+    for line in [c + "\n" for c in content.split("\n")]:
+        # remove C++-style comments
+        if in_cxx_comment:
+            if re.search(r"\*/", line):
+                line = blank(r".*\*/", line)
+                in_cxx_comment = False
+            else:
+                line = " " * (len(line) - 1) + "\n"
+        else:
+            line = blank(r"/\*.*?\*/", line)
+        if re.search(r"/\*", line):
+            line = blank(r"/\*.*", line)
+            in_cxx_comment = True
+        line = blank(r"//[^\r\n]*\n", line, add_newline=True)
+        prepared_content += line
+    return prepared_content
 
 
 def _is_func_decl_type(node_type):
@@ -534,6 +603,8 @@ class PrefixTransformer(c_ast.NodeVisitor):
 
 class Transformer:
     def __init__(self, code, prefix=""):
+        code = remove_comments(code)
+        code = rewrite_cproblem_pycparserext(code)
         parser = GnuCParser()
         self.ast = parser.parse(code)
         self.generator = GnuCGenerator()
