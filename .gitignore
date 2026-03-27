@@ -1,5 +1,6 @@
 output/
 lib/*
+benchmark/*
 lextab.py
 yacctab.py
 sv-benchmarks
