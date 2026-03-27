@@ -1,3 +1,4 @@
 output/
+lib/*
 lextab.py
 yacctab.py
