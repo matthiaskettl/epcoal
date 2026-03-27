@@ -336,6 +336,15 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             self.visit(node.iffalse)
             self.pop_scope()
 
+    # ---------- Struct ----------
+    def visit_Struct(self, node):
+        # Struct names (e.g. "Point" in "struct Point { ... }") must NEVER be renamed.
+        # Only visit the field declarations, keeping field names unchanged (in_struct would prevent
+        # any unwanted renaming anyway, but this visitor ensures clarity).
+        if node.decls:
+            for decl in node.decls:
+                self.visit(decl)
+
     # ---------- Identifier ----------
     def visit_ID(self, node):
         node.name = self.resolve(node.name)
@@ -420,6 +429,10 @@ class PrefixTransformer(c_ast.NodeVisitor):
         self.pop_scope()
 
     def visit_Struct(self, node):
+        # Struct names (e.g. "Point" in "struct Point { ... }") must NEVER be renamed.
+        # When visiting field declarations inside the struct, set in_struct=1 to prevent
+        # accidentally renaming the field names themselves (renaming only variable names,
+        # not struct definition member names).
         self.in_struct += 1
         if node.decls:
             for decl in node.decls:
@@ -427,7 +440,9 @@ class PrefixTransformer(c_ast.NodeVisitor):
         self.in_struct -= 1
 
     def visit_StructRef(self, node):
-        # Do not rename struct field identifiers.
+        # Visit the struct variable being accessed (e.g. "p" in "p.x"),
+        # but do NOT rename the field name (e.g. "x" in "p.x").
+        # The field name is a string attribute, not an ID node, so it's safe.
         self.visit(node.name)
 
     def visit_Decl(self, node):
@@ -440,6 +455,8 @@ class PrefixTransformer(c_ast.NodeVisitor):
                 node.name = self.function_names.get(node.name, self._prefixed(node.name))
                 self._rename_type(node.type, node.name)
             elif self.in_struct == 0:
+                # Rename VARIABLE DECLARATIONS only (e.g. "p" in "struct Point p;").
+                # Struct names themselves (e.g. "Point") are string attributes and are never renamed.
                 old = node.name
                 # Distinguish original translation-unit globals from globalized locals.
                 is_file_scope = len(self.scopes) == 1
