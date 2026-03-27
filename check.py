@@ -3,6 +3,7 @@
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -24,6 +25,14 @@ def run_command(cmd, cwd):
     return result
 
 
+def run_timed_step(step_name, cmd, cwd):
+    start = time.perf_counter()
+    result = run_command(cmd, cwd)
+    elapsed = time.perf_counter() - start
+    print(f"[timing] {step_name}: {elapsed:.3f}s")
+    return result, elapsed
+
+
 def classify_cpachecker_output(output_text):
     if "Verification result: TRUE" in output_text:
         return "equivalent"
@@ -33,6 +42,8 @@ def classify_cpachecker_output(output_text):
 
 
 def main():
+    total_start = time.perf_counter()
+
     parser = argparse.ArgumentParser(
         description="Transform original/mutant C files, merge them, and run CPAchecker."
     )
@@ -86,7 +97,8 @@ def main():
     py = sys.executable
 
     # 1) Transform original
-    result = run_command(
+    result, _ = run_timed_step(
+        "transform original",
         [
             py,
             str(transformer_py),
@@ -102,7 +114,8 @@ def main():
         return result.returncode
 
     # 2) Transform mutant
-    result = run_command(
+    result, _ = run_timed_step(
+        "transform mutant",
         [
             py,
             str(transformer_py),
@@ -118,7 +131,8 @@ def main():
         return result.returncode
 
     # 3) Merge
-    result = run_command(
+    result, _ = run_timed_step(
+        "merge",
         [
             py,
             str(merge_py),
@@ -135,7 +149,8 @@ def main():
         return result.returncode
 
     # 4) Run CPAchecker
-    result = run_command(
+    result, _ = run_timed_step(
+        "cpachecker",
         [
             str(cpachecker),
             "--32" if args.datamodel == 32 else "--64",
@@ -149,6 +164,8 @@ def main():
     combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
     verdict = classify_cpachecker_output(combined_output)
 
+    total_elapsed = time.perf_counter() - total_start
+    print(f"[timing] total: {total_elapsed:.3f}s")
     print(f"\nFinal verdict: {verdict}")
     return 0
 
