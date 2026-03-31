@@ -280,6 +280,28 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
     return "".join(out)
 
 
+def normalize_comma_assert_statements(content: str) -> str:
+    """Normalize string-literal comma assertions into regular statements.
+
+    Some generated inputs contain expression statements like:
+      "tag", __VERIFIER_assert(cond), x = y;
+    This is valid C, but can confuse editor parsers and trigger cascading diagnostics.
+    """
+    pattern = re.compile(
+        r'(?m)^([ \t]*)"[^"\n]*"\s*,\s*'
+        r'([A-Za-z_][A-Za-z0-9_]*___VERIFIER_assert\([^;\n]*\))\s*,\s*'
+        r'([^;\n]+);$'
+    )
+
+    def _replace(match):
+        indent = match.group(1)
+        assertion = match.group(2)
+        assignment = match.group(3)
+        return f"{indent}{assertion};\n{indent}{assignment};"
+
+    return pattern.sub(_replace, content)
+
+
 def _is_func_decl_type(node_type):
     return isinstance(node_type, (c_ast.FuncDecl, FuncDeclExt))
 
@@ -465,10 +487,9 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                 stmt.name = new
                 self._rename_type(stmt.type, new)
 
-                # For struct/union types, keep initializer on the declaration.
+                # For aggregates (struct/union/array), keep initializer on declaration.
                 # For other types, move initializer to a separate assignment.
-                if self._is_struct_or_union_type(stmt.type):
-                    # Keep initializer with the declaration for structs/unions
+                if self._requires_decl_initializer(stmt.type):
                     self.global_decls.append(stmt)
                 else:
                     # Move initializer to assignment for scalar types
@@ -561,8 +582,8 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             decl.name = new
             self._rename_type(decl.type, new)
 
-            # For struct/union types, keep initializer on declaration
-            if self._is_struct_or_union_type(decl.type):
+            # For aggregates (struct/union/array), keep initializer on declaration.
+            if self._requires_decl_initializer(decl.type):
                 self.global_decls.append(decl)
                 node.init = c_ast.EmptyStatement()
             else:
@@ -653,6 +674,18 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             inner_type = decl_type.type
             return isinstance(inner_type, (c_ast.Struct, c_ast.Union))
         return False
+
+    def _is_array_type(self, decl_type):
+        """Check if a declaration type is an array (possibly wrapped)."""
+        if isinstance(decl_type, c_ast.ArrayDecl):
+            return True
+        if hasattr(decl_type, "type"):
+            return self._is_array_type(decl_type.type)
+        return False
+
+    def _requires_decl_initializer(self, decl_type):
+        """Types whose initializers must stay on declaration."""
+        return self._is_struct_or_union_type(decl_type) or self._is_array_type(decl_type)
 
 
 class PrefixTransformer(c_ast.NodeVisitor):
@@ -868,6 +901,7 @@ class Transformer:
         if ast is None:
             ast = self.ast
         generated = self.generator.visit(ast)
+        generated = normalize_comma_assert_statements(generated)
         return ensure_asm_volatile_semicolons(generated)
     
 

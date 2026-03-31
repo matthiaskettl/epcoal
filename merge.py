@@ -125,6 +125,28 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
     return "".join(out)
 
 
+def normalize_comma_assert_statements(content: str) -> str:
+    """Normalize string-literal comma assertions into regular statements.
+
+    Some generated inputs contain expression statements like:
+      "tag", __VERIFIER_assert(cond), x = y;
+    This is valid C, but can confuse editor parsers and trigger cascading diagnostics.
+    """
+    pattern = re.compile(
+        r'(?m)^([ \t]*)"[^"\n]*"\s*,\s*'
+        r'([A-Za-z_][A-Za-z0-9_]*___VERIFIER_assert\([^;\n]*\))\s*,\s*'
+        r'([^;\n]+);$'
+    )
+
+    def _replace(match):
+        indent = match.group(1)
+        assertion = match.group(2)
+        assignment = match.group(3)
+        return f"{indent}{assertion};\n{indent}{assignment};"
+
+    return pattern.sub(_replace, content)
+
+
 class AssertionBuilder:
     """Helper to build assertion comparisons for different types."""
 
@@ -1116,6 +1138,7 @@ class Merger:
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
         generated = self.generator.visit(merged_ast)
+        generated = normalize_comma_assert_statements(generated)
         return ensure_asm_volatile_semicolons(generated)
 
 
