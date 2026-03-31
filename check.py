@@ -161,6 +161,9 @@ def main():
         "cpachecker",
         [
             str(cpachecker),
+            "--benchmark",
+            "--heap",
+            "13000M",
             "--32" if args.datamodel == 32 else "--64",
             "--spec",
             "sv-comp-reachability",
