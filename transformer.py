@@ -85,6 +85,92 @@ def remove_comments(content: str):
     return prepared_content
 
 
+def blank_asm_volatile_with_brackets(content: str) -> str:
+    """Blank out `__asm__ volatile (...) ;` calls that contain `[` or `]` inside `(...)`.
+
+    The match may span multiple lines. Newlines are preserved so line numbers stay stable.
+    """
+    chars = list(content)
+    n = len(content)
+    i = 0
+
+    while i < n:
+        if not content.startswith("__asm__", i):
+            i += 1
+            continue
+
+        # Avoid matching the middle of a longer identifier.
+        if i > 0 and (content[i - 1].isalnum() or content[i - 1] == "_"):
+            i += 1
+            continue
+
+        j = i + len("__asm__")
+        while j < n and content[j].isspace():
+            j += 1
+
+        if not content.startswith("volatile", j):
+            i += 1
+            continue
+
+        j += len("volatile")
+        while j < n and content[j].isspace():
+            j += 1
+
+        if j >= n or content[j] != "(":
+            i += 1
+            continue
+
+        # Find the matching ')' while handling nested parens and string/char literals.
+        depth = 1
+        k = j + 1
+        in_string = None
+        escaped = False
+        has_square_bracket = False
+
+        while k < n and depth > 0:
+            ch = content[k]
+            if in_string is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = None
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = ch
+                elif ch == "[" or ch == "]":
+                    has_square_bracket = True
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+            k += 1
+
+        # Unbalanced parentheses: skip this candidate.
+        if depth != 0:
+            i += 1
+            continue
+
+        m = k
+        while m < n and content[m].isspace():
+            m += 1
+
+        # Only handle function-style asm statements that end with `);`.
+        if m >= n or content[m] != ";":
+            i += 1
+            continue
+
+        if has_square_bracket:
+            for pos in range(i, m + 1):
+                if chars[pos] != "\n":
+                    chars[pos] = " "
+
+        i = m + 1
+
+    return "".join(chars)
+
+
 def _is_func_decl_type(node_type):
     return isinstance(node_type, (c_ast.FuncDecl, FuncDeclExt))
 
@@ -604,6 +690,7 @@ class PrefixTransformer(c_ast.NodeVisitor):
 class Transformer:
     def __init__(self, code, prefix=""):
         code = remove_comments(code)
+        code = blank_asm_volatile_with_brackets(code)
         code = rewrite_cproblem_pycparserext(code)
         parser = GnuCParser()
         self.ast = parser.parse(code)

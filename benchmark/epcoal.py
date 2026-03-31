@@ -14,7 +14,7 @@ class Tool(BaseTool2):
     Tool info for invariant-learning.
     """
 
-    REQUIRED_PATHS = ["lib", "examples", "check.py", "transform.py", "merge.py"]
+    REQUIRED_PATHS = ["lib", "examples", "check.py", "transformer.py", "merge.py"]
 
     def executable(self, tool_locator: BaseTool2.ToolLocator):
         return tool_locator.find_executable("check.py", subdir=".")
