@@ -171,6 +171,115 @@ def blank_asm_volatile_with_brackets(content: str) -> str:
     return "".join(chars)
 
 
+def ensure_asm_volatile_semicolons(content: str) -> str:
+    """Ensure `__asm__ (...)` statements are followed by `;`.
+
+    Handles multiline asm blocks and optional `volatile`/`__volatile__` qualifiers.
+    """
+
+    def _is_ident_char(ch: str) -> bool:
+        return ch.isalnum() or ch == "_"
+
+    n = len(content)
+    i = 0
+    out = []
+
+    while i < n:
+        start = content.find("__asm__", i)
+        if start == -1:
+            out.append(content[i:])
+            break
+
+        out.append(content[i:start])
+
+        # Reject identifier-contained matches.
+        if start > 0 and _is_ident_char(content[start - 1]):
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        j = start + len("__asm__")
+        if j < n and _is_ident_char(content[j]):
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        while j < n and content[j].isspace():
+            j += 1
+
+        # Support `__asm__ (...)`, `__asm__ volatile (...)`, and `__asm__ __volatile__ (...)`.
+        if content.startswith("volatile", j):
+            q = j + len("volatile")
+            if q < n and _is_ident_char(content[q]):
+                out.append(content[start])
+                i = start + 1
+                continue
+            j = q
+            while j < n and content[j].isspace():
+                j += 1
+        elif content.startswith("__volatile__", j):
+            q = j + len("__volatile__")
+            if q < n and _is_ident_char(content[q]):
+                out.append(content[start])
+                i = start + 1
+                continue
+            j = q
+            while j < n and content[j].isspace():
+                j += 1
+
+        if j >= n or content[j] != "(":
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        # Find matching ')' with support for nested parens and string/char literals.
+        depth = 1
+        k = j + 1
+        in_string = None
+        escaped = False
+
+        while k < n and depth > 0:
+            ch = content[k]
+            if in_string is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = None
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+            k += 1
+
+        # If malformed, keep content untouched from this position.
+        if depth != 0:
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        # k points to char right after matching ')'.
+        p = k
+        while p < n and content[p].isspace():
+            p += 1
+
+        if p < n and content[p] == ";":
+            out.append(content[start:p + 1])
+            i = p + 1
+        else:
+            # Insert semicolon immediately after ')', keep following whitespace/tokens as-is.
+            out.append(content[start:k])
+            out.append(";")
+            out.append(content[k:p])
+            i = p
+
+    return "".join(out)
+
+
 def _is_func_decl_type(node_type):
     return isinstance(node_type, (c_ast.FuncDecl, FuncDeclExt))
 
@@ -698,6 +807,7 @@ class Transformer:
         self.prefix = prefix
 
     def transform(self):
+        """Apply all transformations and return the transformed AST."""
         # Preprocessing: handle reach_error -> abort
         reach_error_transformer = ReachErrorTransformer()
         reach_error_transformer.visit(self.ast)
@@ -751,7 +861,14 @@ class Transformer:
             prefix_transformer = PrefixTransformer(self.prefix, original_global_names=original_global_names)
             prefix_transformer.visit(self.ast)
 
-        return self.generator.visit(self.ast)
+        return self.ast
+
+    def generate_code(self, ast=None):
+        """Generate C code from the given AST (or the internally stored AST)."""
+        if ast is None:
+            ast = self.ast
+        generated = self.generator.visit(ast)
+        return ensure_asm_volatile_semicolons(generated)
     
 
 if __name__ == "__main__":
@@ -793,7 +910,9 @@ if __name__ == "__main__":
     
     # Transform the code
     try:
-        transformed_code = Transformer(code, prefix=args.prefix).transform()
+        transformer = Transformer(code, prefix=args.prefix)
+        transformed_ast = transformer.transform()
+        transformed_code = transformer.generate_code(transformed_ast)
     except Exception as e:
         logger.exception("Error transforming code: %s", e)
         sys.exit(1)

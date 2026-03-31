@@ -16,6 +16,114 @@ from pycparserext.ext_c_generator import GnuCGenerator
 logger = logging.getLogger(__name__)
 
 
+def ensure_asm_volatile_semicolons(content: str) -> str:
+    """Ensure `__asm__ (...)` statements are followed by `;`.
+
+    Handles multiline asm blocks and optional `volatile`/`__volatile__` qualifiers.
+    """
+
+    def _is_ident_char(ch: str) -> bool:
+        return ch.isalnum() or ch == "_"
+
+    n = len(content)
+    i = 0
+    out = []
+
+    while i < n:
+        start = content.find("__asm__", i)
+        if start == -1:
+            out.append(content[i:])
+            break
+
+        out.append(content[i:start])
+
+        # Reject identifier-contained matches.
+        if start > 0 and _is_ident_char(content[start - 1]):
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        j = start + len("__asm__")
+        if j < n and _is_ident_char(content[j]):
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        while j < n and content[j].isspace():
+            j += 1
+
+        # Support `__asm__ (...)`, `__asm__ volatile (...)`, and `__asm__ __volatile__ (...)`.
+        if content.startswith("volatile", j):
+            q = j + len("volatile")
+            if q < n and _is_ident_char(content[q]):
+                out.append(content[start])
+                i = start + 1
+                continue
+            j = q
+            while j < n and content[j].isspace():
+                j += 1
+        elif content.startswith("__volatile__", j):
+            q = j + len("__volatile__")
+            if q < n and _is_ident_char(content[q]):
+                out.append(content[start])
+                i = start + 1
+                continue
+            j = q
+            while j < n and content[j].isspace():
+                j += 1
+
+        if j >= n or content[j] != "(":
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        # Find matching ')' with support for nested parens and string/char literals.
+        depth = 1
+        k = j + 1
+        in_string = None
+        escaped = False
+
+        while k < n and depth > 0:
+            ch = content[k]
+            if in_string is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = None
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+            k += 1
+
+        if depth != 0:
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        # k points to char right after matching ')'.
+        p = k
+        while p < n and content[p].isspace():
+            p += 1
+
+        if p < n and content[p] == ";":
+            out.append(content[start:p + 1])
+            i = p + 1
+        else:
+            # Insert semicolon immediately after ')', keep following whitespace/tokens as-is.
+            out.append(content[start:k])
+            out.append(";")
+            out.append(content[k:p])
+            i = p
+
+    return "".join(out)
+
+
 class AssertionBuilder:
     """Helper to build assertion comparisons for different types."""
 
@@ -242,32 +350,45 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
 
 
 class Merger:
-    def __init__(self, file1_path, prefix1, file2_path, prefix2):
-        self.file1_path = Path(file1_path)
-        self.file2_path = Path(file2_path)
+    def __init__(self, file1_path, prefix1, file2_path, prefix2, ast1=None, ast2=None):
+        self.file1_path = Path(file1_path) if file1_path is not None else None
+        self.file2_path = Path(file2_path) if file2_path is not None else None
         self.prefix1 = prefix1
         self.prefix2 = prefix2
 
-        parser = GnuCParser()
+        if ast1 is not None and ast2 is not None:
+            self.ast1 = ast1
+            self.ast2 = ast2
+            logger.info("Using pre-parsed AST inputs for merge")
+        else:
+            if self.file1_path is None or self.file2_path is None:
+                raise ValueError("Either both ASTs or both input file paths must be provided")
 
-        # Parse both files
-        try:
-            code1 = self.file1_path.read_text()
-            self.ast1 = parser.parse(code1)
-            logger.info(f"Parsed {self.file1_path}")
-        except Exception as e:
-            logger.error(f"Error parsing {self.file1_path}: {e}")
-            raise
+            parser = GnuCParser()
 
-        try:
-            code2 = self.file2_path.read_text()
-            self.ast2 = parser.parse(code2)
-            logger.info(f"Parsed {self.file2_path}")
-        except Exception as e:
-            logger.error(f"Error parsing {self.file2_path}: {e}")
-            raise
+            # Parse both files
+            try:
+                code1 = self.file1_path.read_text()
+                self.ast1 = parser.parse(code1)
+                logger.info(f"Parsed {self.file1_path}")
+            except Exception as e:
+                logger.error(f"Error parsing {self.file1_path}: {e}")
+                raise
+
+            try:
+                code2 = self.file2_path.read_text()
+                self.ast2 = parser.parse(code2)
+                logger.info(f"Parsed {self.file2_path}")
+            except Exception as e:
+                logger.error(f"Error parsing {self.file2_path}: {e}")
+                raise
 
         self.generator = GnuCGenerator()
+
+    @classmethod
+    def from_asts(cls, ast1, prefix1, ast2, prefix2):
+        """Create a merger from already parsed ASTs."""
+        return cls(None, prefix1, None, prefix2, ast1=ast1, ast2=ast2)
 
     def _strip_prefix(self, name, prefix):
         """Strip a known prefix if present; otherwise return name unchanged."""
@@ -365,6 +486,7 @@ class Merger:
         typedefs = {}  # name -> Typedef
         external_funcs = {}  # name -> Decl(FuncDecl)
         globals_by_name = {}  # name -> Decl(non-FuncDecl)
+        globals_ordered = []  # Keep first-seen order for named and unnamed declarations
         func_defs_by_name = {}  # name -> FuncDef
         passthrough = []
 
@@ -380,7 +502,6 @@ class Merger:
             text = re.sub(r"^__extension__\\s+typedef\\b", "typedef", text)
             return text
 
-        globals_list = []
         func_defs = []
 
         for ext in ext_list:
@@ -418,8 +539,16 @@ class Merger:
                     logger.debug(f"Skipped duplicate global signature: {ext.name}")
                     continue
                 seen_global_signatures.add(sig)
-                if ext.name not in globals_by_name:
+                if ext.name is None:
+                    # Preserve unnamed declarations such as `struct X { ... };`.
+                    # These declarations do not have a stable name key and must not
+                    # be deduplicated by name, otherwise later struct uses see
+                    # incomplete types.
+                    globals_ordered.append(ext)
+                    logger.debug("Added unnamed global/type declaration")
+                elif ext.name not in globals_by_name:
                     globals_by_name[ext.name] = ext
+                    globals_ordered.append(ext)
                     logger.debug(f"Added global: {ext.name}")
                 else:
                     logger.debug(f"Skipped duplicate global by name: {ext.name}")
@@ -439,7 +568,19 @@ class Merger:
             else:
                 passthrough.append(ext)
 
-        globals_list = list(globals_by_name.values())
+        struct_like_decls = []
+        regular_globals = []
+        for decl in globals_ordered:
+            if (
+                isinstance(decl, c_ast.Decl)
+                and decl.name is None
+                and isinstance(decl.type, (c_ast.Struct, c_ast.Union, c_ast.Enum))
+            ):
+                struct_like_decls.append(decl)
+            else:
+                regular_globals.append(decl)
+
+        globals_list = regular_globals
         func_defs = list(func_defs_by_name.values())
         # Emit pure extern declarations first among external functions.
         pure_externals = []
@@ -450,8 +591,17 @@ class Merger:
             else:
                 other_externals.append(decl)
 
-        # Reconstruct: typedefs, pure externs, other externs, globals, passthrough, function defs
-        result = list(typedefs.values()) + pure_externals + other_externals + globals_list + passthrough + func_defs
+        # Reconstruct: typedefs, struct-like declarations, pure externs, other externs,
+        # globals, passthrough, then function definitions.
+        result = (
+            list(typedefs.values())
+            + struct_like_decls
+            + pure_externals
+            + other_externals
+            + globals_list
+            + passthrough
+            + func_defs
+        )
         logger.info(
             f"Reorganized: {len(typedefs)} typedefs, {len(external_funcs)} external functions, "
             f"{len(globals_list)} globals, {len(func_defs)} function definitions"
@@ -731,7 +881,8 @@ class Merger:
 
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
-        return self.generator.visit(merged_ast)
+        generated = self.generator.visit(merged_ast)
+        return ensure_asm_volatile_semicolons(generated)
 
 
 def main():

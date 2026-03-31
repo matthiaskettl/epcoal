@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import importlib.util
 import subprocess
 import sys
 import time
@@ -33,12 +34,34 @@ def run_timed_step(step_name, cmd, cwd):
     return result, elapsed
 
 
+def run_timed_python_step(step_name, fn):
+    start = time.perf_counter()
+    value = fn()
+    elapsed = time.perf_counter() - start
+    print(f"[timing] {step_name}: {elapsed:.3f}s")
+    return value, elapsed
+
+
 def classify_cpachecker_output(output_text):
     if "Verification result: TRUE" in output_text:
         return "equivalent"
     if "Verification result: FALSE" in output_text:
         return "not equivalent"
     return "unknown"
+
+
+def _load_symbol_from_file(module_path, symbol_name):
+    spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    symbol = getattr(module, symbol_name, None)
+    if symbol is None:
+        raise ImportError(f"Symbol `{symbol_name}` not found in {module_path}")
+    return symbol
 
 
 def main():
@@ -81,8 +104,6 @@ def main():
     output_dir = (workdir / args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    original_out = output_dir / "original_transformed.c"
-    mutant_out = output_dir / "mutant_transformed.c"
     merged_out = output_dir / "merged.c"
 
     for required in (transformer_py, merge_py, original_in, mutant_in):
@@ -94,59 +115,46 @@ def main():
         print(f"Error: CPAchecker executable not found at: {cpachecker}", file=sys.stderr)
         return 2
 
-    py = sys.executable
+    try:
+        Transformer = _load_symbol_from_file(transformer_py, "Transformer")
+        Merger = _load_symbol_from_file(merge_py, "Merger")
+    except Exception as e:
+        print(f"Error loading transformer/merge modules from workdir: {e}", file=sys.stderr)
+        return 2
 
-    # 1) Transform original
-    result, _ = run_timed_step(
-        "transform original",
-        [
-            py,
-            str(transformer_py),
-            str(original_in),
-            str(original_out),
-            "--prefix",
-            args.original_prefix,
-        ],
-        cwd=workdir,
-    )
-    if result.returncode != 0:
-        print("Transformation failed for original program.", file=sys.stderr)
-        return result.returncode
+    # 1) Transform original (in-memory AST)
+    try:
+        original_code = original_in.read_text()
+        original_transformer, _ = run_timed_python_step(
+            "create transformer original",
+            lambda: Transformer(original_code, prefix=args.original_prefix),
+        )
+        original_ast, _ = run_timed_python_step("transform original", original_transformer.transform)
+    except Exception as e:
+        print(f"Transformation failed for original program: {e}", file=sys.stderr)
+        return 1
 
-    # 2) Transform mutant
-    result, _ = run_timed_step(
-        "transform mutant",
-        [
-            py,
-            str(transformer_py),
-            str(mutant_in),
-            str(mutant_out),
-            "--prefix",
-            args.mutant_prefix,
-        ],
-        cwd=workdir,
-    )
-    if result.returncode != 0:
-        print("Transformation failed for mutant program.", file=sys.stderr)
-        return result.returncode
+    # 2) Transform mutant (in-memory AST)
+    try:
+        mutant_code = mutant_in.read_text()
+        mutant_transformer, _ = run_timed_python_step(
+            "create transformer mutant",
+            lambda: Transformer(mutant_code, prefix=args.mutant_prefix),
+        )
+        mutant_ast, _ = run_timed_python_step("transform mutant", mutant_transformer.transform)
+    except Exception as e:
+        print(f"Transformation failed for mutant program: {e}", file=sys.stderr)
+        return 1
 
-    # 3) Merge
-    result, _ = run_timed_step(
-        "merge",
-        [
-            py,
-            str(merge_py),
-            str(original_out),
-            args.original_prefix,
-            str(mutant_out),
-            args.mutant_prefix,
-            str(merged_out),
-        ],
-        cwd=workdir,
-    )
-    if result.returncode != 0:
-        print("Merge step failed.", file=sys.stderr)
-        return result.returncode
+    # 3) Merge from ASTs and write only final merged C
+    try:
+        merger = Merger.from_asts(original_ast, args.original_prefix, mutant_ast, args.mutant_prefix)
+        merged_ast, _ = run_timed_python_step("merge", merger.merge)
+        merged_code = merger.generate_code(merged_ast)
+        merged_out.write_text(merged_code)
+    except Exception as e:
+        print(f"Merge step failed: {e}", file=sys.stderr)
+        return 1
 
     # 4) Run CPAchecker
     result, _ = run_timed_step(
