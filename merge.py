@@ -4,6 +4,7 @@ import sys
 import argparse
 import logging
 import re
+import copy
 from pathlib import Path
 
 sys.path.append(str((Path(__file__).absolute().parent / "lib" / "pip")))
@@ -127,9 +128,14 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
 class AssertionBuilder:
     """Helper to build assertion comparisons for different types."""
 
-    def __init__(self, prefix1, prefix2):
+    def __init__(self, prefix1, prefix2, struct_defs=None, union_defs=None, typedef_defs=None):
         self.prefix1 = prefix1
         self.prefix2 = prefix2
+        self.struct_defs = dict(struct_defs or {})
+        self.union_defs = dict(union_defs or {})
+        self.typedef_defs = dict(typedef_defs or {})
+        self.generator = GnuCGenerator()
+        self._loop_counter = 0
 
     def build_assert_equal(self, var_name, type_obj):
         """
@@ -139,12 +145,23 @@ class AssertionBuilder:
         var1 = f"{self.prefix1}{var_name}"
         var2 = f"{self.prefix2}{var_name}"
 
-        # For arrays: need to compare element by element
-        if isinstance(type_obj, c_ast.ArrayDecl):
-            return self._build_array_assert(var1, var2, type_obj)
+        return self._build_compare_assert(var1, var2, type_obj)
 
-        # For simple types (primitives, pointers, etc.)
-        return f"if({var1} != {var2}) {{ reach_error(); }}"
+    def _build_compare_assert(self, lhs, rhs, type_obj):
+        """Build comparison code for a typed lhs/rhs pair."""
+        if isinstance(type_obj, c_ast.ArrayDecl):
+            return self._build_array_assert(lhs, rhs, type_obj)
+
+        struct_type = self._resolve_struct_type(type_obj)
+        if struct_type is not None:
+            return self._build_struct_assert(lhs, rhs, struct_type)
+
+        union_type = self._resolve_union_type(type_obj)
+        if union_type is not None:
+            return self._build_union_assert(lhs, rhs, union_type)
+
+        # Fallback for primitives, pointers, enums, etc.
+        return f"if({lhs} != {rhs}) {{ reach_error(); }}"
 
     def _build_array_assert(self, var1, var2, array_decl):
         """Build code to compare two arrays element by element."""
@@ -158,22 +175,198 @@ class AssertionBuilder:
 
         # Generate the dimension value
         dim_code = self._get_array_dim_code(dim)
+        idx = f"_cmp_i{self._loop_counter}"
+        self._loop_counter += 1
 
-        # Build loop with if statements
-        loop_code = (
+        inner_lhs = f"{var1}[{idx}]"
+        inner_rhs = f"{var2}[{idx}]"
+        inner_code = self._build_compare_assert(inner_lhs, inner_rhs, array_decl.type)
+
+        return (
             f"{{ "
-            f"int _i; "
-            f"for (_i = 0; _i < {dim_code}; _i++) {{ "
-            f"if({var1}[_i] != {var2}[_i]) {{ reach_error(); }} "
+            f"int {idx}; "
+            f"for ({idx} = 0; {idx} < {dim_code}; {idx}++) {{ "
+            f"{inner_code} "
+            f"}} "
             f"}}"
-            f" }}"
         )
-        return loop_code
+
+    def _build_struct_assert(self, lhs, rhs, struct_node):
+        """Build field-by-field comparison for structs."""
+        decls = struct_node.decls
+        if decls is None and struct_node.name:
+            resolved = self.struct_defs.get(struct_node.name)
+            if resolved is not None:
+                decls = resolved.decls
+
+        # If struct layout is not available, fallback to bytewise comparison.
+        if not decls:
+            logger.warning("Struct layout unavailable for `%s`, using memcmp fallback", struct_node.name)
+            return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+
+        checks = []
+        for field in decls:
+            # Anonymous fields are rare in these inputs; skip with a warning if present.
+            if not isinstance(field, c_ast.Decl) or not field.name:
+                logger.warning("Skipping anonymous/unsupported struct field in `%s`", struct_node.name)
+                continue
+
+            field_lhs = f"({lhs}).{field.name}"
+            field_rhs = f"({rhs}).{field.name}"
+            checks.append(self._build_compare_assert(field_lhs, field_rhs, field.type))
+
+        return "{ " + " ".join(checks) + " }"
+
+    def _build_union_assert(self, lhs, rhs, union_node):
+        """Build comparison code for unions.
+
+        Comparing all union fields is not sound because only one variant is active.
+        Use bytewise equality over the storage instead.
+        """
+        _ = union_node  # keep signature parallel to struct path
+        return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+
+    def _resolve_struct_type(self, type_obj, seen_typedefs=None):
+        """Resolve a type object to a concrete struct node if possible."""
+        if seen_typedefs is None:
+            seen_typedefs = set()
+
+        if isinstance(type_obj, c_ast.Struct):
+            if type_obj.decls:
+                return type_obj
+            if type_obj.name and type_obj.name in self.struct_defs:
+                return self.struct_defs[type_obj.name]
+            return type_obj
+
+        if isinstance(type_obj, c_ast.TypeDecl):
+            inner = type_obj.type
+            if isinstance(inner, c_ast.Struct):
+                return self._resolve_struct_type(inner, seen_typedefs)
+            if isinstance(inner, c_ast.Union):
+                return None
+            if isinstance(inner, c_ast.IdentifierType) and len(inner.names) == 1:
+                alias = inner.names[0]
+                if alias in seen_typedefs:
+                    return None
+                target = self.typedef_defs.get(alias)
+                if target is not None:
+                    seen_typedefs.add(alias)
+                    return self._resolve_struct_type(target, seen_typedefs)
+            return None
+
+        if isinstance(type_obj, c_ast.IdentifierType):
+            # Case: direct alias usage, e.g. `wait_queue_head_t`.
+            if len(type_obj.names) == 1:
+                alias = type_obj.names[0]
+                if alias in seen_typedefs:
+                    return None
+                target = self.typedef_defs.get(alias)
+                if target is not None:
+                    seen_typedefs.add(alias)
+                    return self._resolve_struct_type(target, seen_typedefs)
+
+            # Case: tokenizer emits "struct X" as IdentifierType names.
+            if len(type_obj.names) >= 2 and type_obj.names[0] == "struct":
+                struct_name = type_obj.names[-1]
+                resolved = self.struct_defs.get(struct_name)
+                if resolved is not None:
+                    return resolved
+                return c_ast.Struct(name=struct_name, decls=None)
+
+            return None
+
+        return None
+
+    def _resolve_union_type(self, type_obj, seen_typedefs=None):
+        """Resolve a type object to a concrete union node if possible."""
+        if seen_typedefs is None:
+            seen_typedefs = set()
+
+        if isinstance(type_obj, c_ast.Union):
+            if type_obj.decls:
+                return type_obj
+            if type_obj.name and type_obj.name in self.union_defs:
+                return self.union_defs[type_obj.name]
+            return type_obj
+
+        if isinstance(type_obj, c_ast.TypeDecl):
+            inner = type_obj.type
+            if isinstance(inner, c_ast.Union):
+                return self._resolve_union_type(inner, seen_typedefs)
+            if isinstance(inner, c_ast.Struct):
+                return None
+            if isinstance(inner, c_ast.IdentifierType) and len(inner.names) == 1:
+                alias = inner.names[0]
+                if alias in seen_typedefs:
+                    return None
+                target = self.typedef_defs.get(alias)
+                if target is not None:
+                    seen_typedefs.add(alias)
+                    return self._resolve_union_type(target, seen_typedefs)
+            return None
+
+        if isinstance(type_obj, c_ast.IdentifierType):
+            # Case: direct alias usage, e.g. typedef to union.
+            if len(type_obj.names) == 1:
+                alias = type_obj.names[0]
+                if alias in seen_typedefs:
+                    return None
+                target = self.typedef_defs.get(alias)
+                if target is not None:
+                    seen_typedefs.add(alias)
+                    return self._resolve_union_type(target, seen_typedefs)
+
+            # Case: tokenizer emits "union X" as IdentifierType names.
+            if len(type_obj.names) >= 2 and type_obj.names[0] == "union":
+                union_name = type_obj.names[-1]
+                resolved = self.union_defs.get(union_name)
+                if resolved is not None:
+                    return resolved
+                return c_ast.Union(name=union_name, decls=None)
+
+            return None
+
+        return None
 
     def _get_array_dim_code(self, dim):
         """Extract array dimension as C code."""
-        generator = GnuCGenerator()
-        return generator.visit(dim)
+        return self.generator.visit(dim)
+
+
+class StructDefCollector(c_ast.NodeVisitor):
+    """Collect named struct definitions that have field declarations."""
+
+    def __init__(self):
+        self.struct_defs = {}
+
+    def visit_Struct(self, node):
+        if node.name and node.decls and node.name not in self.struct_defs:
+            self.struct_defs[node.name] = node
+        self.generic_visit(node)
+
+
+class UnionDefCollector(c_ast.NodeVisitor):
+    """Collect named union definitions that have field declarations."""
+
+    def __init__(self):
+        self.union_defs = {}
+
+    def visit_Union(self, node):
+        if node.name and node.decls and node.name not in self.union_defs:
+            self.union_defs[node.name] = node
+        self.generic_visit(node)
+
+
+class TypedefDefCollector(c_ast.NodeVisitor):
+    """Collect typedef definitions for recursive type resolution."""
+
+    def __init__(self):
+        self.typedef_defs = {}
+
+    def visit_Typedef(self, node):
+        if node.name and node.name not in self.typedef_defs:
+            self.typedef_defs[node.name] = node.type
+        self.generic_visit(node)
 
 
 class NondetDetector:
@@ -450,7 +643,10 @@ class Merger:
         # Build equality checks for all matched variables.
         # Nondet inputs are synchronized through shared pure functions and invocation counter,
         # so they should still be compared after both mains run.
-        check_code = self._build_assertions(var_pairs)
+        struct_defs = self._collect_struct_definitions(merged_ast_temp)
+        union_defs = self._collect_union_definitions(merged_ast_temp)
+        typedef_defs = self._collect_typedef_definitions(merged_ast_temp)
+        check_code = self._build_assertions(var_pairs, struct_defs, union_defs, typedef_defs)
 
         # Create external declarations for pure functions from both global nondet vars and function body calls
         self._add_pure_function_declarations_all(merged_ext, nondet_pairs, replacer.nondet_calls_found)
@@ -582,6 +778,19 @@ class Merger:
 
         globals_list = regular_globals
         func_defs = list(func_defs_by_name.values())
+
+        # Emit forward declarations for function definitions so globals that
+        # reference function symbols in initializers (e.g., ops tables) have
+        # visible declarations during binding/type checks.
+        forward_func_decls = []
+        seen_forward_signatures = set()
+        for fdef in func_defs:
+            fdecl = copy.deepcopy(fdef.decl)
+            sig = _normalize_decl_text(self.generator.visit(fdecl))
+            if sig in seen_forward_signatures:
+                continue
+            seen_forward_signatures.add(sig)
+            forward_func_decls.append(fdecl)
         # Emit pure extern declarations first among external functions.
         pure_externals = []
         other_externals = []
@@ -598,6 +807,7 @@ class Merger:
             + struct_like_decls
             + pure_externals
             + other_externals
+            + forward_func_decls
             + globals_list
             + passthrough
             + func_defs
@@ -684,9 +894,33 @@ class Merger:
 
         return var_pairs
 
-    def _build_assertions(self, var_pairs):
+    def _collect_struct_definitions(self, root):
+        """Collect named struct definitions from the merged translation unit."""
+        collector = StructDefCollector()
+        collector.visit(root)
+        return collector.struct_defs
+
+    def _collect_union_definitions(self, root):
+        """Collect named union definitions from the merged translation unit."""
+        collector = UnionDefCollector()
+        collector.visit(root)
+        return collector.union_defs
+
+    def _collect_typedef_definitions(self, root):
+        """Collect typedef definitions from the merged translation unit."""
+        collector = TypedefDefCollector()
+        collector.visit(root)
+        return collector.typedef_defs
+
+    def _build_assertions(self, var_pairs, struct_defs=None, union_defs=None, typedef_defs=None):
         """Build equality check statements for matched variable pairs."""
-        builder = AssertionBuilder(self.prefix1, self.prefix2)
+        builder = AssertionBuilder(
+            self.prefix1,
+            self.prefix2,
+            struct_defs=struct_defs,
+            union_defs=union_defs,
+            typedef_defs=typedef_defs,
+        )
         checks = []
 
         for var1, _var2, decl1 in var_pairs:

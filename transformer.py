@@ -454,9 +454,9 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                     self.counters[key] = count
 
                     if count == 1:
-                        new = f"{self.current_func}_{old}"
+                        new = f"{self.current_func}__local_{old}"
                     else:
-                        new = f"{self.current_func}_{count}_{old}"
+                        new = f"{self.current_func}__local_{count}_{old}"
 
                 # register in scope
                 self.scopes[-1][old] = new
@@ -552,9 +552,9 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             self.counters[key] = count
 
             if count == 1:
-                new = f"{self.current_func}_{old}"
+                new = f"{self.current_func}__local_{old}"
             else:
-                new = f"{self.current_func}_{count}_{old}"
+                new = f"{self.current_func}__local_{count}_{old}"
 
             self.scopes[-1][old] = new
 
