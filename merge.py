@@ -205,25 +205,48 @@ class AssertionBuilder:
             return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
 
         checks = []
+        needs_fallback = False
         for field in decls:
             # Anonymous fields are rare in these inputs; skip with a warning if present.
             if not isinstance(field, c_ast.Decl) or not field.name:
                 logger.warning("Skipping anonymous/unsupported struct field in `%s`", struct_node.name)
+                needs_fallback = True
                 continue
 
             field_lhs = f"({lhs}).{field.name}"
             field_rhs = f"({rhs}).{field.name}"
             checks.append(self._build_compare_assert(field_lhs, field_rhs, field.type))
 
+        # If parts of the struct are opaque/unsupported, keep precise checks for known
+        # fields and add a bytewise fallback to cover the rest.
+        if needs_fallback:
+            checks.append(f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}")
+
+        if not checks:
+            return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+
         return "{ " + " ".join(checks) + " }"
 
     def _build_union_assert(self, lhs, rhs, union_node):
         """Build comparison code for unions.
 
-        Comparing all union fields is not sound because only one variant is active.
-        Use bytewise equality over the storage instead.
+        Prefer a field comparison only in the trivial case of exactly one named field.
+        Otherwise use bytewise equality over the storage.
         """
-        _ = union_node  # keep signature parallel to struct path
+        decls = union_node.decls
+        if decls is None and union_node.name:
+            resolved = self.union_defs.get(union_node.name)
+            if resolved is not None:
+                decls = resolved.decls
+
+        if decls:
+            named_fields = [f for f in decls if isinstance(f, c_ast.Decl) and f.name]
+            if len(named_fields) == 1:
+                field = named_fields[0]
+                field_lhs = f"({lhs}).{field.name}"
+                field_rhs = f"({rhs}).{field.name}"
+                return self._build_compare_assert(field_lhs, field_rhs, field.type)
+
         return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
 
     def _resolve_struct_type(self, type_obj, seen_typedefs=None):
