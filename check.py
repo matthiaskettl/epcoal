@@ -97,6 +97,11 @@ def main():
         action="store_true",
         help="Pass benchmark options (--benchmark --heap 13000M) to CPAchecker",
     )
+    parser.add_argument(
+        "--no-memcmp",
+        action="store_true",
+        help="Use byte-wise loop fallback instead of memcmp for opaque comparisons",
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir).resolve()
@@ -153,7 +158,13 @@ def main():
 
     # 3) Merge from ASTs and write only final merged C
     try:
-        merger = Merger.from_asts(original_ast, args.original_prefix, mutant_ast, args.mutant_prefix)
+        merger = Merger.from_asts(
+            original_ast,
+            args.original_prefix,
+            mutant_ast,
+            args.mutant_prefix,
+            no_memcmp=args.no_memcmp,
+        )
         merged_ast, _ = run_timed_python_step("merge", merger.merge)
         merged_code = merger.generate_code(merged_ast)
         merged_out.write_text(merged_code)

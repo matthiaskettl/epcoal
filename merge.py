@@ -128,12 +128,13 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
 class AssertionBuilder:
     """Helper to build assertion comparisons for different types."""
 
-    def __init__(self, prefix1, prefix2, struct_defs=None, union_defs=None, typedef_defs=None):
+    def __init__(self, prefix1, prefix2, struct_defs=None, union_defs=None, typedef_defs=None, no_memcmp=False):
         self.prefix1 = prefix1
         self.prefix2 = prefix2
         self.struct_defs = dict(struct_defs or {})
         self.union_defs = dict(union_defs or {})
         self.typedef_defs = dict(typedef_defs or {})
+        self.no_memcmp = no_memcmp
         self.generator = GnuCGenerator()
         self._loop_counter = 0
 
@@ -191,6 +192,28 @@ class AssertionBuilder:
             f"}}"
         )
 
+    def _build_memcmp_or_byte_loop_assert(self, lhs, rhs):
+        """Build fallback equality for opaque sub-objects."""
+        if not self.no_memcmp:
+            return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+
+        idx = f"_cmp_b{self._loop_counter}"
+        self._loop_counter += 1
+        a_ptr = f"_cmp_a{self._loop_counter}"
+        self._loop_counter += 1
+        b_ptr = f"_cmp_bptr{self._loop_counter}"
+        self._loop_counter += 1
+        return (
+            "{ "
+            f"unsigned long {idx}; "
+            f"const unsigned char *{a_ptr} = (const unsigned char *)&({lhs}); "
+            f"const unsigned char *{b_ptr} = (const unsigned char *)&({rhs}); "
+            f"for ({idx} = 0; {idx} < sizeof({lhs}); {idx}++) {{ "
+            f"if ({a_ptr}[{idx}] != {b_ptr}[{idx}]) {{ reach_error(); }} "
+            "} "
+            "}"
+        )
+
     def _build_struct_assert(self, lhs, rhs, struct_node):
         """Build field-by-field comparison for structs."""
         decls = struct_node.decls
@@ -202,7 +225,7 @@ class AssertionBuilder:
         # If struct layout is not available, fallback to bytewise comparison.
         if not decls:
             logger.warning("Struct layout unavailable for `%s`, using memcmp fallback", struct_node.name)
-            return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+            return self._build_memcmp_or_byte_loop_assert(lhs, rhs)
 
         checks = []
         needs_fallback = False
@@ -220,10 +243,10 @@ class AssertionBuilder:
         # If parts of the struct are opaque/unsupported, keep precise checks for known
         # fields and add a bytewise fallback to cover the rest.
         if needs_fallback:
-            checks.append(f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}")
+            checks.append(self._build_memcmp_or_byte_loop_assert(lhs, rhs))
 
         if not checks:
-            return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+            return self._build_memcmp_or_byte_loop_assert(lhs, rhs)
 
         return "{ " + " ".join(checks) + " }"
 
@@ -247,7 +270,7 @@ class AssertionBuilder:
                 field_rhs = f"({rhs}).{field.name}"
                 return self._build_compare_assert(field_lhs, field_rhs, field.type)
 
-        return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
+        return self._build_memcmp_or_byte_loop_assert(lhs, rhs)
 
     def _resolve_struct_type(self, type_obj, seen_typedefs=None):
         """Resolve a type object to a concrete struct node if possible."""
@@ -594,7 +617,7 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
         if side == "original":
             helper_name = "__handle_original_exit"
         elif side == "mutant":
-            helper_name = "__handle_mutant_exit"
+            helper_name = "__compare_global_state"
         else:
             return
 
@@ -617,7 +640,7 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
             return
 
         if node.decl.name == self.mutant_main_name:
-            helper = "__handle_mutant_exit"
+            helper = "__compare_global_state"
             self._instrument_main_body(node, helper)
             return
 
@@ -687,11 +710,12 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
 
 
 class Merger:
-    def __init__(self, file1_path, prefix1, file2_path, prefix2, ast1=None, ast2=None):
+    def __init__(self, file1_path, prefix1, file2_path, prefix2, ast1=None, ast2=None, no_memcmp=False):
         self.file1_path = Path(file1_path) if file1_path is not None else None
         self.file2_path = Path(file2_path) if file2_path is not None else None
         self.prefix1 = prefix1
         self.prefix2 = prefix2
+        self.no_memcmp = no_memcmp
 
         if ast1 is not None and ast2 is not None:
             self.ast1 = ast1
@@ -723,9 +747,9 @@ class Merger:
         self.generator = GnuCGenerator()
 
     @classmethod
-    def from_asts(cls, ast1, prefix1, ast2, prefix2):
+    def from_asts(cls, ast1, prefix1, ast2, prefix2, no_memcmp=False):
         """Create a merger from already parsed ASTs."""
-        return cls(None, prefix1, None, prefix2, ast1=ast1, ast2=ast2)
+        return cls(None, prefix1, None, prefix2, ast1=ast1, ast2=ast2, no_memcmp=no_memcmp)
 
     def _strip_prefix(self, name, prefix):
         """Strip a known prefix if present; otherwise return name unchanged."""
@@ -779,6 +803,9 @@ class Merger:
         # Instrument return/fall-through exits in both prefixed main functions.
         main_exit_instrumenter = MainExitInstrumenter(self.prefix1, self.prefix2)
         main_exit_instrumenter.visit(merged_ast_temp)
+
+        # Remove duplicate adjacent compare calls after instrumentation/rewrite.
+        self._deduplicate_consecutive_compare_calls(merged_ast_temp)
 
         # Replace all __VERIFIER_nondet_X() calls in function bodies with pure function calls
         replacer = NondetCallReplacer(self.prefix1, self.prefix2)
@@ -1072,6 +1099,7 @@ class Merger:
             struct_defs=struct_defs,
             union_defs=union_defs,
             typedef_defs=typedef_defs,
+            no_memcmp=self.no_memcmp,
         )
         checks = []
 
@@ -1244,6 +1272,9 @@ class Merger:
 
     def _add_memcmp_decl_if_needed(self, ext_list, checks):
         """Add `extern int memcmp(...)` when memcmp is referenced by generated checks."""
+        if self.no_memcmp:
+            return
+
         if not any("memcmp(" in stmt for stmt in checks):
             return
 
@@ -1270,6 +1301,7 @@ class Merger:
         helper_code = f"""
         void {helper_name}() {{
             {check_code}
+            abort();
         }}
         """
         parsed = parser.parse(helper_code)
@@ -1277,7 +1309,7 @@ class Merger:
         logger.info("Added global comparison helper `%s`", helper_name)
 
     def _add_exit_helpers(self, ext_list):
-        """Add the single original and mutant exit handlers."""
+        """Add original-side exit handler."""
 
         existing_funcs = {
             ext.decl.name
@@ -1286,19 +1318,6 @@ class Merger:
         }
 
         parser = GnuCParser()
-
-        mutant_helper = "__handle_mutant_exit"
-        if mutant_helper not in existing_funcs:
-            mutant_code = f"""
-            void {mutant_helper}() {{
-                __compare_global_state();
-                abort();
-            }}
-            """
-            parsed = parser.parse(mutant_code)
-            ext_list.insert(0, parsed.ext[0])
-            existing_funcs.add(mutant_helper)
-            logger.info("Added termination helper `%s`", mutant_helper)
 
         original_helper = "__handle_original_exit"
         if original_helper not in existing_funcs:
@@ -1312,6 +1331,35 @@ class Merger:
             ext_list.insert(0, parsed.ext[0])
             existing_funcs.add(original_helper)
             logger.info("Added termination helper `%s`", original_helper)
+
+    def _deduplicate_consecutive_compare_calls(self, root):
+        """Drop immediately repeated compare/original-exit helper calls."""
+
+        def _is_target_call(stmt):
+            return (
+                isinstance(stmt, c_ast.FuncCall)
+                and isinstance(stmt.name, c_ast.ID)
+                and stmt.name.name in {"__compare_global_state", "__handle_original_exit"}
+            )
+
+        class _Deduper(c_ast.NodeVisitor):
+            def visit_Compound(self, node):
+                items = node.block_items or []
+                deduped = []
+                prev_target = False
+                for stmt in items:
+                    current_target = _is_target_call(stmt)
+                    if current_target and prev_target:
+                        continue
+                    deduped.append(stmt)
+                    prev_target = current_target
+
+                node.block_items = deduped
+
+                for stmt in node.block_items:
+                    self.visit(stmt)
+
+        _Deduper().visit(root)
 
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
@@ -1330,11 +1378,16 @@ def main():
     parser.add_argument("input2", type=str, help="Path to second transformed C file")
     parser.add_argument("prefix2", type=str, help="Prefix used for second file")
     parser.add_argument("output", type=str, help="Path to output merged C file")
+    parser.add_argument(
+        "--no-memcmp",
+        action="store_true",
+        help="Use byte-wise loop fallback instead of memcmp for opaque comparisons",
+    )
 
     args = parser.parse_args()
 
     try:
-        merger = Merger(args.input1, args.prefix1, args.input2, args.prefix2)
+        merger = Merger(args.input1, args.prefix1, args.input2, args.prefix2, no_memcmp=args.no_memcmp)
         merged_ast = merger.merge()
         merged_code = merger.generate_code(merged_ast)
 
