@@ -102,6 +102,17 @@ def main():
         action="store_true",
         help="Use byte-wise loop fallback instead of memcmp for opaque comparisons",
     )
+    parser.add_argument(
+        "--pointer-policy",
+        choices=["strict", "nullness", "ignore-funcptr"],
+        default="strict",
+        help="Pointer equality policy used in generated comparisons",
+    )
+    parser.add_argument(
+        "--compare-modified-only",
+        action="store_true",
+        help="Compare only globals that are assigned/updated in either version (heuristic)",
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir).resolve()
@@ -164,6 +175,8 @@ def main():
             mutant_ast,
             args.mutant_prefix,
             no_memcmp=args.no_memcmp,
+            pointer_policy=args.pointer_policy,
+            compare_modified_only=args.compare_modified_only,
         )
         merged_ast, _ = run_timed_python_step("merge", merger.merge)
         merged_code = merger.generate_code(merged_ast)
@@ -193,7 +206,13 @@ def main():
     total_elapsed = time.perf_counter() - total_start
     print(f"[timing] total: {total_elapsed:.3f}s")
     print(f"\nFinal verdict: {verdict}")
-    return 0
+
+    # Keep FALSE as a normal, successful verification outcome.
+    if verdict in ("equivalent", "not equivalent"):
+        return 0
+
+    # Unknown/crash should be surfaced to callers and automation.
+    return result.returncode if result.returncode != 0 else 1
 
 
 if __name__ == "__main__":

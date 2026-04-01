@@ -128,13 +128,23 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
 class AssertionBuilder:
     """Helper to build assertion comparisons for different types."""
 
-    def __init__(self, prefix1, prefix2, struct_defs=None, union_defs=None, typedef_defs=None, no_memcmp=False):
+    def __init__(
+        self,
+        prefix1,
+        prefix2,
+        struct_defs=None,
+        union_defs=None,
+        typedef_defs=None,
+        no_memcmp=False,
+        pointer_policy="strict",
+    ):
         self.prefix1 = prefix1
         self.prefix2 = prefix2
         self.struct_defs = dict(struct_defs or {})
         self.union_defs = dict(union_defs or {})
         self.typedef_defs = dict(typedef_defs or {})
         self.no_memcmp = no_memcmp
+        self.pointer_policy = pointer_policy
         self.generator = GnuCGenerator()
         self._loop_counter = 0
 
@@ -153,6 +163,10 @@ class AssertionBuilder:
         if isinstance(type_obj, c_ast.ArrayDecl):
             return self._build_array_assert(lhs, rhs, type_obj)
 
+        ptr_kind = self._resolve_pointer_kind(type_obj)
+        if ptr_kind is not None:
+            return self._build_pointer_assert(lhs, rhs, ptr_kind)
+
         struct_type = self._resolve_struct_type(type_obj)
         if struct_type is not None:
             return self._build_struct_assert(lhs, rhs, struct_type)
@@ -162,6 +176,17 @@ class AssertionBuilder:
             return self._build_union_assert(lhs, rhs, union_type)
 
         # Fallback for primitives, pointers, enums, etc.
+        return f"if({lhs} != {rhs}) {{ reach_error(); }}"
+
+    def _build_pointer_assert(self, lhs, rhs, ptr_kind):
+        """Build pointer comparison according to configured policy."""
+        policy = self.pointer_policy
+        if policy == "nullness":
+            return f"if((({lhs}) == 0) != (({rhs}) == 0)) {{ reach_error(); }}"
+
+        if policy == "ignore-funcptr" and ptr_kind == "funcptr":
+            return "/* function-pointer equality ignored by policy */"
+
         return f"if({lhs} != {rhs}) {{ reach_error(); }}"
 
     def _build_array_assert(self, var1, var2, array_decl):
@@ -230,8 +255,24 @@ class AssertionBuilder:
         checks = []
         needs_fallback = False
         for field in decls:
-            # Anonymous fields are rare in these inputs; skip with a warning if present.
-            if not isinstance(field, c_ast.Decl) or not field.name:
+            if not isinstance(field, c_ast.Decl):
+                logger.warning("Skipping unsupported struct field node in `%s`", struct_node.name)
+                needs_fallback = True
+                continue
+
+            # Handle anonymous nested structs by comparing their promoted members directly.
+            if not field.name:
+                anon_struct = self._resolve_struct_type(field.type)
+                if anon_struct is not None and anon_struct.decls:
+                    for nested in anon_struct.decls:
+                        if not isinstance(nested, c_ast.Decl) or not nested.name:
+                            needs_fallback = True
+                            continue
+                        nested_lhs = f"({lhs}).{nested.name}"
+                        nested_rhs = f"({rhs}).{nested.name}"
+                        checks.append(self._build_compare_assert(nested_lhs, nested_rhs, nested.type))
+                    continue
+
                 logger.warning("Skipping anonymous/unsupported struct field in `%s`", struct_node.name)
                 needs_fallback = True
                 continue
@@ -371,6 +412,51 @@ class AssertionBuilder:
                 return c_ast.Union(name=union_name, decls=None)
 
             return None
+
+        return None
+
+    def _resolve_pointer_kind(self, type_obj, seen_typedefs=None):
+        """Resolve whether type is pointer/function-pointer: returns ptr kind or None."""
+        if seen_typedefs is None:
+            seen_typedefs = set()
+
+        if isinstance(type_obj, c_ast.PtrDecl):
+            target = type_obj.type
+            if isinstance(target, c_ast.FuncDecl):
+                return "funcptr"
+            if isinstance(target, c_ast.TypeDecl) and isinstance(target.type, c_ast.IdentifierType):
+                names = target.type.names
+                if len(names) == 1:
+                    alias = names[0]
+                    if alias not in seen_typedefs:
+                        seen_typedefs.add(alias)
+                        td = self.typedef_defs.get(alias)
+                        if td is not None:
+                            nested = self._resolve_pointer_kind(td, seen_typedefs)
+                            if nested is not None:
+                                return nested
+            return "ptr"
+
+        if isinstance(type_obj, c_ast.TypeDecl):
+            inner = type_obj.type
+            if isinstance(inner, c_ast.IdentifierType) and len(inner.names) == 1:
+                alias = inner.names[0]
+                if alias in seen_typedefs:
+                    return None
+                target = self.typedef_defs.get(alias)
+                if target is not None:
+                    seen_typedefs.add(alias)
+                    return self._resolve_pointer_kind(target, seen_typedefs)
+            return None
+
+        if isinstance(type_obj, c_ast.IdentifierType) and len(type_obj.names) == 1:
+            alias = type_obj.names[0]
+            if alias in seen_typedefs:
+                return None
+            target = self.typedef_defs.get(alias)
+            if target is not None:
+                seen_typedefs.add(alias)
+                return self._resolve_pointer_kind(target, seen_typedefs)
 
         return None
 
@@ -543,14 +629,19 @@ class NondetCallReplacer(c_ast.NodeVisitor):
         )
     
     def _get_var_name(self, lvalue):
-        """Extract variable name from lvalue."""
+        """Extract a stable key from lvalue for naming pure nondet streams."""
         if isinstance(lvalue, c_ast.ID):
             return lvalue.name
         elif isinstance(lvalue, c_ast.ArrayRef):
-            # For array references, get the base name
-            return self._get_var_name(lvalue.name)
+            base = self._get_var_name(lvalue.name)
+            return f"{base}__idx" if base else None
         elif isinstance(lvalue, c_ast.StructRef):
-            return lvalue.field.name
+            base = self._get_var_name(lvalue.name)
+            field = lvalue.field.name if isinstance(lvalue.field, c_ast.ID) else "field"
+            op = "ptr" if lvalue.type == "->" else "dot"
+            if base:
+                return f"{base}__{op}__{field}"
+            return field
         return None
 
     def _to_base_name(self, var_name):
@@ -558,10 +649,14 @@ class NondetCallReplacer(c_ast.NodeVisitor):
         if not var_name:
             return None
         if var_name.startswith(self.prefix1):
-            return var_name[len(self.prefix1):]
+            var_name = var_name[len(self.prefix1):]
         if var_name.startswith(self.prefix2):
-            return var_name[len(self.prefix2):]
-        return var_name
+            var_name = var_name[len(self.prefix2):]
+
+        # Keep generated name a valid C identifier.
+        var_name = re.sub(r"[^A-Za-z0-9_]", "_", var_name)
+        var_name = re.sub(r"_+", "_", var_name).strip("_")
+        return var_name or "nondet_site"
 
 
 class TerminationCallReplacer(c_ast.NodeVisitor):
@@ -710,12 +805,25 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
 
 
 class Merger:
-    def __init__(self, file1_path, prefix1, file2_path, prefix2, ast1=None, ast2=None, no_memcmp=False):
+    def __init__(
+        self,
+        file1_path,
+        prefix1,
+        file2_path,
+        prefix2,
+        ast1=None,
+        ast2=None,
+        no_memcmp=False,
+        pointer_policy="strict",
+        compare_modified_only=False,
+    ):
         self.file1_path = Path(file1_path) if file1_path is not None else None
         self.file2_path = Path(file2_path) if file2_path is not None else None
         self.prefix1 = prefix1
         self.prefix2 = prefix2
         self.no_memcmp = no_memcmp
+        self.pointer_policy = pointer_policy
+        self.compare_modified_only = compare_modified_only
 
         if ast1 is not None and ast2 is not None:
             self.ast1 = ast1
@@ -747,9 +855,28 @@ class Merger:
         self.generator = GnuCGenerator()
 
     @classmethod
-    def from_asts(cls, ast1, prefix1, ast2, prefix2, no_memcmp=False):
+    def from_asts(
+        cls,
+        ast1,
+        prefix1,
+        ast2,
+        prefix2,
+        no_memcmp=False,
+        pointer_policy="strict",
+        compare_modified_only=False,
+    ):
         """Create a merger from already parsed ASTs."""
-        return cls(None, prefix1, None, prefix2, ast1=ast1, ast2=ast2, no_memcmp=no_memcmp)
+        return cls(
+            None,
+            prefix1,
+            None,
+            prefix2,
+            ast1=ast1,
+            ast2=ast2,
+            no_memcmp=no_memcmp,
+            pointer_policy=pointer_policy,
+            compare_modified_only=compare_modified_only,
+        )
 
     def _strip_prefix(self, name, prefix):
         """Strip a known prefix if present; otherwise return name unchanged."""
@@ -806,6 +933,20 @@ class Merger:
 
         # Remove duplicate adjacent compare calls after instrumentation/rewrite.
         self._deduplicate_consecutive_compare_calls(merged_ast_temp)
+
+        if self.compare_modified_only:
+            modified_globals = self._collect_written_prefixed_globals(merged_ast_temp)
+            before = len(var_pairs)
+            var_pairs = [
+                (v1, v2, d)
+                for (v1, v2, d) in var_pairs
+                if v1 in modified_globals or v2 in modified_globals
+            ]
+            logger.info(
+                "Filtered global comparisons to modified-only set: %d -> %d",
+                before,
+                len(var_pairs),
+            )
 
         # Replace all __VERIFIER_nondet_X() calls in function bodies with pure function calls
         replacer = NondetCallReplacer(self.prefix1, self.prefix2)
@@ -1100,6 +1241,7 @@ class Merger:
             union_defs=union_defs,
             typedef_defs=typedef_defs,
             no_memcmp=self.no_memcmp,
+            pointer_policy=self.pointer_policy,
         )
         checks = []
 
@@ -1335,24 +1477,24 @@ class Merger:
     def _deduplicate_consecutive_compare_calls(self, root):
         """Drop immediately repeated compare/original-exit helper calls."""
 
-        def _is_target_call(stmt):
-            return (
-                isinstance(stmt, c_ast.FuncCall)
-                and isinstance(stmt.name, c_ast.ID)
-                and stmt.name.name in {"__compare_global_state", "__handle_original_exit"}
-            )
+        def _target_call_name(stmt):
+            if isinstance(stmt, c_ast.FuncCall) and isinstance(stmt.name, c_ast.ID):
+                name = stmt.name.name
+                if name in {"__compare_global_state", "__handle_original_exit"}:
+                    return name
+            return None
 
         class _Deduper(c_ast.NodeVisitor):
             def visit_Compound(self, node):
                 items = node.block_items or []
                 deduped = []
-                prev_target = False
+                prev_target_name = None
                 for stmt in items:
-                    current_target = _is_target_call(stmt)
-                    if current_target and prev_target:
+                    current_target_name = _target_call_name(stmt)
+                    if current_target_name is not None and current_target_name == prev_target_name:
                         continue
                     deduped.append(stmt)
-                    prev_target = current_target
+                    prev_target_name = current_target_name
 
                 node.block_items = deduped
 
@@ -1360,6 +1502,39 @@ class Merger:
                     self.visit(stmt)
 
         _Deduper().visit(root)
+
+    def _collect_written_prefixed_globals(self, root):
+        """Collect prefixed globals that appear on assignment/update lvalues."""
+
+        def _base_id(expr):
+            if isinstance(expr, c_ast.ID):
+                return expr.name
+            if isinstance(expr, c_ast.ArrayRef):
+                return _base_id(expr.name)
+            if isinstance(expr, c_ast.StructRef):
+                return _base_id(expr.name)
+            return None
+
+        writes = set()
+        prefixes = (self.prefix1, self.prefix2)
+
+        class _WriteCollector(c_ast.NodeVisitor):
+            def _record(self, expr):
+                name = _base_id(expr)
+                if isinstance(name, str) and any(name.startswith(p) for p in prefixes):
+                    writes.add(name)
+
+            def visit_Assignment(self, node):
+                self._record(node.lvalue)
+                self.generic_visit(node)
+
+            def visit_UnaryOp(self, node):
+                if node.op in {"p++", "p--", "++", "--"}:
+                    self._record(node.expr)
+                self.generic_visit(node)
+
+        _WriteCollector().visit(root)
+        return writes
 
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
@@ -1383,11 +1558,30 @@ def main():
         action="store_true",
         help="Use byte-wise loop fallback instead of memcmp for opaque comparisons",
     )
+    parser.add_argument(
+        "--pointer-policy",
+        choices=["strict", "nullness", "ignore-funcptr"],
+        default="strict",
+        help="Pointer equality policy used in generated comparisons",
+    )
+    parser.add_argument(
+        "--compare-modified-only",
+        action="store_true",
+        help="Compare only globals that are assigned/updated in either version (heuristic)",
+    )
 
     args = parser.parse_args()
 
     try:
-        merger = Merger(args.input1, args.prefix1, args.input2, args.prefix2, no_memcmp=args.no_memcmp)
+        merger = Merger(
+            args.input1,
+            args.prefix1,
+            args.input2,
+            args.prefix2,
+            no_memcmp=args.no_memcmp,
+            pointer_policy=args.pointer_policy,
+            compare_modified_only=args.compare_modified_only,
+        )
         merged_ast = merger.merge()
         merged_code = merger.generate_code(merged_ast)
 
