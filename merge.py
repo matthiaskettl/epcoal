@@ -519,12 +519,7 @@ class NondetCallReplacer(c_ast.NodeVisitor):
 
 
 class TerminationCallReplacer(c_ast.NodeVisitor):
-    """Rewrite terminating calls to side-specific helpers.
-
-    Original-side calls dispatch into helpers that execute the mutant program,
-    wait for the same termination kind, and compare globals.
-    Mutant-side calls only mark the reached termination kind.
-    """
+    """Rewrite terminating calls to side-specific helpers."""
 
     TERMINATION_KIND_BY_NAME = {
         "abort": "abort",
@@ -542,8 +537,7 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
         self.prefix1 = prefix1
         self.prefix2 = prefix2
         self._side_stack = []
-        self.used_kinds_original = set()
-        self.used_kinds_mutant = set()
+        self.used_kinds = set()
 
     def _current_side(self):
         if not self._side_stack:
@@ -577,12 +571,12 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
         side = self._current_side()
         if side == "original":
             helper_name = f"__handle_original_{kind}_1"
-            self.used_kinds_original.add(kind)
         elif side == "mutant":
-            helper_name = f"__mark_mutant_{kind}_1"
-            self.used_kinds_mutant.add(kind)
+            helper_name = f"__handle_mutant_{kind}_1"
         else:
             return
+
+        self.used_kinds.add(kind)
 
         logger.debug("Replaced terminating call `%s` with `%s()`", node.name.name, helper_name)
         node.name = c_ast.ID(helper_name)
@@ -606,7 +600,7 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
             return
 
         if node.decl.name == self.mutant_main_name:
-            helper = "__mark_mutant_return_1"
+            helper = "__handle_mutant_return_1"
             self.used_return_mutant = True
             self._instrument_main_body(node, helper)
             return
@@ -798,14 +792,13 @@ class Merger:
         # Ensure reach_error function is present
         self._add_reach_error_if_missing(merged_ext)
 
-        # Add termination flags and helper dispatchers for each used termination kind.
+        # Add helper dispatchers for each used termination kind.
         termination_kinds = sorted(
-            termination_replacer.used_kinds_original
-            .union(termination_replacer.used_kinds_mutant)
+            termination_replacer.used_kinds
             .union({"return"} if (main_exit_instrumenter.used_return_original or main_exit_instrumenter.used_return_mutant) else set())
         )
-        self._add_termination_flag_globals(merged_ext, termination_kinds)
-        self._add_termination_helpers(merged_ext, termination_kinds, check_code)
+        self._add_global_compare_helper(merged_ext, check_code)
+        self._add_termination_helpers(merged_ext, termination_kinds)
 
         # Create new main function
         new_main = self._create_merged_main(nondet_pairs)
@@ -1234,30 +1227,25 @@ class Merger:
         except Exception as e:
             logger.warning(f"Could not add reach_error function: {e}")
 
-    def _add_termination_flag_globals(self, ext_list, termination_kinds):
-        """Declare side-specific global flags for used termination kinds."""
-        if not termination_kinds:
-            return
-
-        existing_globals = {
-            ext.name
-            for ext in ext_list
-            if isinstance(ext, c_ast.Decl) and not isinstance(ext.type, c_ast.FuncDecl) and ext.name
-        }
+    def _add_global_compare_helper(self, ext_list, checks):
+        """Add a single helper that compares all matched globals."""
+        helper_name = "__compare_global_state"
+        for ext in ext_list:
+            if isinstance(ext, c_ast.FuncDef) and ext.decl.name == helper_name:
+                return
 
         parser = GnuCParser()
-        for kind in termination_kinds:
-            for side in ("original", "mutant"):
-                var_name = f"{side}_reached_{kind}_1"
-                if var_name in existing_globals:
-                    continue
+        check_code = "\n".join(checks)
+        helper_code = f"""
+        void {helper_name}() {{
+            {check_code}
+        }}
+        """
+        parsed = parser.parse(helper_code)
+        ext_list.insert(0, parsed.ext[0])
+        logger.info("Added global comparison helper `%s`", helper_name)
 
-                parsed = parser.parse(f"int {var_name} = 0;")
-                ext_list.insert(0, parsed.ext[0])
-                existing_globals.add(var_name)
-                logger.info("Added termination flag global: int %s = 0;", var_name)
-
-    def _add_termination_helpers(self, ext_list, termination_kinds, checks):
+    def _add_termination_helpers(self, ext_list, termination_kinds):
         """Add helper functions used by rewritten termination calls."""
         if not termination_kinds:
             return
@@ -1269,19 +1257,14 @@ class Merger:
         }
 
         parser = GnuCParser()
-        check_code = "\n".join(checks)
 
         for kind in termination_kinds:
-            mutant_helper = f"__mark_mutant_{kind}_1"
+            mutant_helper = f"__handle_mutant_{kind}_1"
             if mutant_helper not in existing_funcs:
                 mutant_code = f"""
                 void {mutant_helper}() {{
-                    mutant_reached_{kind}_1 = 1;
-                    if (original_reached_{kind}_1 != 1) {{
-                        reach_error();
-                    }} else {{
-                        {check_code}
-                    }}
+                    __compare_global_state();
+                    abort();
                 }}
                 """
                 parsed = parser.parse(mutant_code)
@@ -1293,7 +1276,6 @@ class Merger:
             if original_helper not in existing_funcs:
                 original_code = f"""
                 void {original_helper}() {{
-                    original_reached_{kind}_1 = 1;
                     __invocation_count = 0;
                     {self.prefix2}main();
                 }}
