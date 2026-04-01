@@ -280,26 +280,14 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
     return "".join(out)
 
 
-def normalize_comma_assert_statements(content: str) -> str:
-    """Normalize string-literal comma assertions into regular statements.
+def rewrite_unsupported_builtins(content: str) -> str:
+    """Rewrite compiler builtins that CPAchecker may not resolve safely.
 
-    Some generated inputs contain expression statements like:
-      "tag", __VERIFIER_assert(cond), x = y;
-    This is valid C, but can confuse editor parsers and trigger cascading diagnostics.
+    `__builtin_unreachable()` has no regular declaration and may trigger
+    null-declaration crashes in downstream tools. Replacing it with `abort()`
+    keeps the control-flow intent explicit and analyzable.
     """
-    pattern = re.compile(
-        r'(?m)^([ \t]*)"[^"\n]*"\s*,\s*'
-        r'([A-Za-z_][A-Za-z0-9_]*___VERIFIER_assert\([^;\n]*\))\s*,\s*'
-        r'([^;\n]+);$'
-    )
-
-    def _replace(match):
-        indent = match.group(1)
-        assertion = match.group(2)
-        assignment = match.group(3)
-        return f"{indent}{assertion};\n{indent}{assignment};"
-
-    return pattern.sub(_replace, content)
+    return re.sub(r"\b__builtin_unreachable\s*\(\s*\)", "abort()", content)
 
 
 def _is_func_decl_type(node_type):
@@ -457,6 +445,20 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             if isinstance(stmt, c_ast.Decl) and not _is_func_decl_type(stmt.type):
                 old = stmt.name
 
+                # Keep aggregate declarations local when their initializer references
+                # identifiers. Hoisting such declarations to file scope would create
+                # invalid C (e.g., initializers that depend on parameters/locals).
+                if (
+                    self.current_func is not None
+                    and self._requires_decl_initializer(stmt.type)
+                    and stmt.init is not None
+                    and self._contains_identifier(stmt.init)
+                ):
+                    self.scopes[-1][old] = old
+                    self.visit(stmt)
+                    new_block_items.append(stmt)
+                    continue
+
                 # Keep function parameter declarations untouched (e.g., K&R style param decls
                 # that may appear at top of the function compound in this AST).
                 if (
@@ -568,39 +570,50 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
             decl = node.init
             old = decl.name
 
-            key = (self.current_func, old)
-            count = self.counters.get(key, 0) + 1
-            self.counters[key] = count
-
-            if count == 1:
-                new = f"{self.current_func}__local_{old}"
+            # Keep aggregate for-init declarations local when initializer depends on
+            # identifiers; file-scope hoisting would produce invalid initializers.
+            if (
+                self.current_func is not None
+                and self._requires_decl_initializer(decl.type)
+                and decl.init is not None
+                and self._contains_identifier(decl.init)
+            ):
+                self.scopes[-1][old] = old
+                self.visit(decl)
+                node.init = decl
             else:
-                new = f"{self.current_func}__local_{count}_{old}"
-
-            self.scopes[-1][old] = new
-
-            decl.name = new
-            self._rename_type(decl.type, new)
-
-            # For aggregates (struct/union/array), keep initializer on declaration.
-            if self._requires_decl_initializer(decl.type):
-                self.global_decls.append(decl)
-                node.init = c_ast.EmptyStatement()
-            else:
-                init = decl.init
-                decl.init = None
-                self.global_decls.append(decl)
-
-                if init is not None:
-                    # Rewrite IDs in initializer based on the current scope mapping.
-                    self.visit(init)
-                    node.init = c_ast.Assignment(
-                        op='=',
-                        lvalue=c_ast.ID(name=new),
-                        rvalue=init
-                    )
+                key = (self.current_func, old)
+                count = self.counters.get(key, 0) + 1
+                self.counters[key] = count
+                if count == 1:
+                    new = f"{self.current_func}__local_{old}"
                 else:
+                    new = f"{self.current_func}__local_{count}_{old}"
+
+                self.scopes[-1][old] = new
+
+                decl.name = new
+                self._rename_type(decl.type, new)
+
+                # For aggregates (struct/union/array), keep initializer on declaration.
+                if self._requires_decl_initializer(decl.type):
+                    self.global_decls.append(decl)
                     node.init = c_ast.EmptyStatement()
+                else:
+                    init = decl.init
+                    decl.init = None
+                    self.global_decls.append(decl)
+
+                    if init is not None:
+                        # Rewrite IDs in initializer based on the current scope mapping.
+                        self.visit(init)
+                        node.init = c_ast.Assignment(
+                            op='=',
+                            lvalue=c_ast.ID(name=new),
+                            rvalue=init
+                        )
+                    else:
+                        node.init = c_ast.EmptyStatement()
 
         else:
             if node.init:
@@ -686,6 +699,17 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
     def _requires_decl_initializer(self, decl_type):
         """Types whose initializers must stay on declaration."""
         return self._is_struct_or_union_type(decl_type) or self._is_array_type(decl_type)
+
+    def _contains_identifier(self, node):
+        """Return True if subtree contains at least one identifier reference."""
+        if node is None:
+            return False
+        if isinstance(node, c_ast.ID):
+            return True
+        for _, child in node.children():
+            if self._contains_identifier(child):
+                return True
+        return False
 
 
 class PrefixTransformer(c_ast.NodeVisitor):
@@ -833,6 +857,7 @@ class Transformer:
     def __init__(self, code, prefix=""):
         code = remove_comments(code)
         code = blank_asm_volatile_with_brackets(code)
+        code = rewrite_unsupported_builtins(code)
         code = rewrite_cproblem_pycparserext(code)
         parser = GnuCParser()
         self.ast = parser.parse(code)
@@ -901,7 +926,6 @@ class Transformer:
         if ast is None:
             ast = self.ast
         generated = self.generator.visit(ast)
-        generated = normalize_comma_assert_statements(generated)
         return ensure_asm_volatile_semicolons(generated)
     
 

@@ -773,6 +773,9 @@ class Merger:
         typedef_defs = self._collect_typedef_definitions(merged_ast_temp)
         check_code = self._build_assertions(var_pairs, struct_defs, union_defs, typedef_defs)
 
+        # Some fallback equality checks use memcmp; ensure a declaration exists.
+        self._add_memcmp_decl_if_needed(merged_ext, check_code)
+
         # Create external declarations for pure functions from both global nondet vars and function body calls
         self._add_pure_function_declarations_all(merged_ext, nondet_pairs, replacer.nondet_calls_found)
 
@@ -1215,6 +1218,22 @@ class Merger:
             logger.info("Added reach_error() function at top of merged code")
         except Exception as e:
             logger.warning(f"Could not add reach_error function: {e}")
+
+    def _add_memcmp_decl_if_needed(self, ext_list, checks):
+        """Add `extern int memcmp(...)` when memcmp is referenced by generated checks."""
+        if not any("memcmp(" in stmt for stmt in checks):
+            return
+
+        for ext in ext_list:
+            if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl) and ext.name == "memcmp":
+                return
+
+        parser = GnuCParser()
+        # Use unsigned long for size to avoid dependency on typedef size_t ordering.
+        decl_code = "extern int memcmp(const void *lhs, const void *rhs, unsigned long n);"
+        parsed = parser.parse(decl_code)
+        ext_list.insert(0, parsed.ext[0])
+        logger.info("Added external declaration for memcmp")
 
     def _add_global_compare_helper(self, ext_list, checks):
         """Add a single helper that compares all matched globals."""
