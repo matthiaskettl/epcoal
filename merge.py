@@ -537,7 +537,6 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
         self.prefix1 = prefix1
         self.prefix2 = prefix2
         self._side_stack = []
-        self.used_kinds = set()
 
     def _current_side(self):
         if not self._side_stack:
@@ -570,13 +569,11 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
 
         side = self._current_side()
         if side == "original":
-            helper_name = f"__handle_original_{kind}_1"
+            helper_name = "__handle_original_exit"
         elif side == "mutant":
-            helper_name = f"__handle_mutant_{kind}_1"
+            helper_name = "__handle_mutant_exit"
         else:
             return
-
-        self.used_kinds.add(kind)
 
         logger.debug("Replaced terminating call `%s` with `%s()`", node.name.name, helper_name)
         node.name = c_ast.ID(helper_name)
@@ -589,19 +586,15 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
     def __init__(self, prefix1, prefix2):
         self.original_main_name = f"{prefix1}main"
         self.mutant_main_name = f"{prefix2}main"
-        self.used_return_original = False
-        self.used_return_mutant = False
 
     def visit_FuncDef(self, node):
         if node.decl.name == self.original_main_name:
-            helper = "__handle_original_return_1"
-            self.used_return_original = True
+            helper = "__handle_original_exit"
             self._instrument_main_body(node, helper)
             return
 
         if node.decl.name == self.mutant_main_name:
-            helper = "__handle_mutant_return_1"
-            self.used_return_mutant = True
+            helper = "__handle_mutant_exit"
             self._instrument_main_body(node, helper)
             return
 
@@ -792,13 +785,9 @@ class Merger:
         # Ensure reach_error function is present
         self._add_reach_error_if_missing(merged_ext)
 
-        # Add helper dispatchers for each used termination kind.
-        termination_kinds = sorted(
-            termination_replacer.used_kinds
-            .union({"return"} if (main_exit_instrumenter.used_return_original or main_exit_instrumenter.used_return_mutant) else set())
-        )
+        # Add shared exit helpers and comparison helper.
         self._add_global_compare_helper(merged_ext, check_code)
-        self._add_termination_helpers(merged_ext, termination_kinds)
+        self._add_exit_helpers(merged_ext)
 
         # Create new main function
         new_main = self._create_merged_main(nondet_pairs)
@@ -1245,10 +1234,8 @@ class Merger:
         ext_list.insert(0, parsed.ext[0])
         logger.info("Added global comparison helper `%s`", helper_name)
 
-    def _add_termination_helpers(self, ext_list, termination_kinds):
-        """Add helper functions used by rewritten termination calls."""
-        if not termination_kinds:
-            return
+    def _add_exit_helpers(self, ext_list):
+        """Add the single original and mutant exit handlers."""
 
         existing_funcs = {
             ext.decl.name
@@ -1258,32 +1245,31 @@ class Merger:
 
         parser = GnuCParser()
 
-        for kind in termination_kinds:
-            mutant_helper = f"__handle_mutant_{kind}_1"
-            if mutant_helper not in existing_funcs:
-                mutant_code = f"""
-                void {mutant_helper}() {{
-                    __compare_global_state();
-                    abort();
-                }}
-                """
-                parsed = parser.parse(mutant_code)
-                ext_list.insert(0, parsed.ext[0])
-                existing_funcs.add(mutant_helper)
-                logger.info("Added termination helper `%s`", mutant_helper)
+        mutant_helper = "__handle_mutant_exit"
+        if mutant_helper not in existing_funcs:
+            mutant_code = f"""
+            void {mutant_helper}() {{
+                __compare_global_state();
+                abort();
+            }}
+            """
+            parsed = parser.parse(mutant_code)
+            ext_list.insert(0, parsed.ext[0])
+            existing_funcs.add(mutant_helper)
+            logger.info("Added termination helper `%s`", mutant_helper)
 
-            original_helper = f"__handle_original_{kind}_1"
-            if original_helper not in existing_funcs:
-                original_code = f"""
-                void {original_helper}() {{
-                    __invocation_count = 0;
-                    {self.prefix2}main();
-                }}
-                """
-                parsed = parser.parse(original_code)
-                ext_list.insert(0, parsed.ext[0])
-                existing_funcs.add(original_helper)
-                logger.info("Added termination helper `%s`", original_helper)
+        original_helper = "__handle_original_exit"
+        if original_helper not in existing_funcs:
+            original_code = f"""
+            void {original_helper}() {{
+                __invocation_count = 0;
+                {self.prefix2}main();
+            }}
+            """
+            parsed = parser.parse(original_code)
+            ext_list.insert(0, parsed.ext[0])
+            existing_funcs.add(original_helper)
+            logger.info("Added termination helper `%s`", original_helper)
 
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
