@@ -3,6 +3,7 @@
 <benchmark tool="epcoal" displayName="EPCOAL" timelimit="15 min" hardtimelimit="16 min" memlimit="15 GB" cpuCores="4">
 
   <require cpuModel="Intel Xeon E3-1230 v5 @ 3.40 GHz" />
+  <option name="--benchmark"/>
 
   <!-- DEFINITIONS-->
 
