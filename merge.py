@@ -125,28 +125,6 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
     return "".join(out)
 
 
-def normalize_comma_assert_statements(content: str) -> str:
-    """Normalize string-literal comma assertions into regular statements.
-
-    Some generated inputs contain expression statements like:
-      "tag", __VERIFIER_assert(cond), x = y;
-    This is valid C, but can confuse editor parsers and trigger cascading diagnostics.
-    """
-    pattern = re.compile(
-        r'(?m)^([ \t]*)"[^"\n]*"\s*,\s*'
-        r'([A-Za-z_][A-Za-z0-9_]*___VERIFIER_assert\([^;\n]*\))\s*,\s*'
-        r'([^;\n]+);$'
-    )
-
-    def _replace(match):
-        indent = match.group(1)
-        assertion = match.group(2)
-        assignment = match.group(3)
-        return f"{indent}{assertion};\n{indent}{assignment};"
-
-    return pattern.sub(_replace, content)
-
-
 class AssertionBuilder:
     """Helper to build assertion comparisons for different types."""
 
@@ -541,27 +519,161 @@ class NondetCallReplacer(c_ast.NodeVisitor):
 
 
 class TerminationCallReplacer(c_ast.NodeVisitor):
-    """Replace terminating function calls with __noop()."""
+    """Rewrite terminating calls to side-specific helpers.
 
-    TERMINATING_NAMES = {
-        "abort",
-        "exit",
-        "_Exit",
-        "quick_exit",
-        "__assert_fail",
-        "__assert",
-        "__assert_perror_fail",
-        "__builtin_trap",
+    Original-side calls dispatch into helpers that execute the mutant program,
+    wait for the same termination kind, and compare globals.
+    Mutant-side calls only mark the reached termination kind.
+    """
+
+    TERMINATION_KIND_BY_NAME = {
+        "abort": "abort",
+        "__assert_fail": "abort",
+        "__assert": "abort",
+        "__assert_perror_fail": "abort",
+        "__builtin_trap": "abort",
+        "exit": "exit",
+        "_Exit": "exit",
+        "quick_exit": "exit",
+        "reach_error": "reach_error",
     }
+
+    def __init__(self, prefix1, prefix2):
+        self.prefix1 = prefix1
+        self.prefix2 = prefix2
+        self._side_stack = []
+        self.used_kinds_original = set()
+        self.used_kinds_mutant = set()
+
+    def _current_side(self):
+        if not self._side_stack:
+            return None
+        return self._side_stack[-1]
+
+    def _get_side_for_function(self, name):
+        if isinstance(name, str) and name.startswith(self.prefix1):
+            return "original"
+        if isinstance(name, str) and name.startswith(self.prefix2):
+            return "mutant"
+        return None
+
+    def visit_FuncDef(self, node):
+        side = self._get_side_for_function(node.decl.name)
+        self._side_stack.append(side)
+        self.generic_visit(node)
+        self._side_stack.pop()
 
     def visit_FuncCall(self, node):
         # First recurse so nested calls get rewritten as well.
         self.generic_visit(node)
 
-        if isinstance(node.name, c_ast.ID) and node.name.name in self.TERMINATING_NAMES:
-            logger.debug("Replaced terminating call `%s` with __noop()", node.name.name)
-            node.name = c_ast.ID("__noop")
-            node.args = None
+        if not isinstance(node.name, c_ast.ID):
+            return
+
+        kind = self.TERMINATION_KIND_BY_NAME.get(node.name.name)
+        if kind is None:
+            return
+
+        side = self._current_side()
+        if side == "original":
+            helper_name = f"__handle_original_{kind}_1"
+            self.used_kinds_original.add(kind)
+        elif side == "mutant":
+            helper_name = f"__mark_mutant_{kind}_1"
+            self.used_kinds_mutant.add(kind)
+        else:
+            return
+
+        logger.debug("Replaced terminating call `%s` with `%s()`", node.name.name, helper_name)
+        node.name = c_ast.ID(helper_name)
+        node.args = None
+
+
+class MainExitInstrumenter(c_ast.NodeVisitor):
+    """Instrument prefixed main functions to trigger exit handling on return/fall-through."""
+
+    def __init__(self, prefix1, prefix2):
+        self.original_main_name = f"{prefix1}main"
+        self.mutant_main_name = f"{prefix2}main"
+        self.used_return_original = False
+        self.used_return_mutant = False
+
+    def visit_FuncDef(self, node):
+        if node.decl.name == self.original_main_name:
+            helper = "__handle_original_return_1"
+            self.used_return_original = True
+            self._instrument_main_body(node, helper)
+            return
+
+        if node.decl.name == self.mutant_main_name:
+            helper = "__mark_mutant_return_1"
+            self.used_return_mutant = True
+            self._instrument_main_body(node, helper)
+            return
+
+        self.generic_visit(node)
+
+    def _instrument_main_body(self, node, helper_name):
+        node.body = self._rewrite_stmt(node.body, helper_name)
+        if isinstance(node.body, c_ast.Compound):
+            if node.body.block_items is None:
+                node.body.block_items = []
+            # Fall-through exit at end of main body.
+            node.body.block_items.append(c_ast.FuncCall(c_ast.ID(helper_name), None))
+
+    def _wrap_return(self, ret_stmt, helper_name):
+        return c_ast.Compound([
+            c_ast.FuncCall(c_ast.ID(helper_name), None),
+            ret_stmt,
+        ])
+
+    def _rewrite_stmt(self, stmt, helper_name):
+        if stmt is None:
+            return None
+
+        if isinstance(stmt, c_ast.Return):
+            return self._wrap_return(stmt, helper_name)
+
+        if isinstance(stmt, c_ast.Compound):
+            items = stmt.block_items or []
+            stmt.block_items = [self._rewrite_stmt(s, helper_name) for s in items]
+            return stmt
+
+        if isinstance(stmt, c_ast.If):
+            stmt.iftrue = self._rewrite_stmt(stmt.iftrue, helper_name)
+            if stmt.iffalse is not None:
+                stmt.iffalse = self._rewrite_stmt(stmt.iffalse, helper_name)
+            return stmt
+
+        if isinstance(stmt, c_ast.For):
+            stmt.stmt = self._rewrite_stmt(stmt.stmt, helper_name)
+            return stmt
+
+        if isinstance(stmt, c_ast.While):
+            stmt.stmt = self._rewrite_stmt(stmt.stmt, helper_name)
+            return stmt
+
+        if isinstance(stmt, c_ast.DoWhile):
+            stmt.stmt = self._rewrite_stmt(stmt.stmt, helper_name)
+            return stmt
+
+        if isinstance(stmt, c_ast.Switch):
+            stmt.stmt = self._rewrite_stmt(stmt.stmt, helper_name)
+            return stmt
+
+        if isinstance(stmt, c_ast.Label):
+            stmt.stmt = self._rewrite_stmt(stmt.stmt, helper_name)
+            return stmt
+
+        if isinstance(stmt, c_ast.Case):
+            stmt.stmts = [self._rewrite_stmt(s, helper_name) for s in (stmt.stmts or [])]
+            return stmt
+
+        if isinstance(stmt, c_ast.Default):
+            stmt.stmts = [self._rewrite_stmt(s, helper_name) for s in (stmt.stmts or [])]
+            return stmt
+
+        return stmt
 
 
 class Merger:
@@ -649,10 +761,14 @@ class Merger:
         # Create merged AST: concatenate both ASTs
         merged_ext = list(self.ast1.ext) + list(self.ast2.ext)
 
-        # Replace terminating calls with __noop() so verification continues.
-        termination_replacer = TerminationCallReplacer()
+        # Rewrite terminating calls to side-specific helpers.
+        termination_replacer = TerminationCallReplacer(self.prefix1, self.prefix2)
         merged_ast_temp = c_ast.FileAST(merged_ext)
         termination_replacer.visit(merged_ast_temp)
+
+        # Instrument return/fall-through exits in both prefixed main functions.
+        main_exit_instrumenter = MainExitInstrumenter(self.prefix1, self.prefix2)
+        main_exit_instrumenter.visit(merged_ast_temp)
 
         # Replace all __VERIFIER_nondet_X() calls in function bodies with pure function calls
         replacer = NondetCallReplacer(self.prefix1, self.prefix2)
@@ -682,11 +798,17 @@ class Merger:
         # Ensure reach_error function is present
         self._add_reach_error_if_missing(merged_ext)
 
-        # Ensure __noop function is present for replaced terminating calls
-        self._add_noop_if_missing(merged_ext)
+        # Add termination flags and helper dispatchers for each used termination kind.
+        termination_kinds = sorted(
+            termination_replacer.used_kinds_original
+            .union(termination_replacer.used_kinds_mutant)
+            .union({"return"} if (main_exit_instrumenter.used_return_original or main_exit_instrumenter.used_return_mutant) else set())
+        )
+        self._add_termination_flag_globals(merged_ext, termination_kinds)
+        self._add_termination_helpers(merged_ext, termination_kinds, check_code)
 
         # Create new main function
-        new_main = self._create_merged_main(check_code, nondet_pairs)
+        new_main = self._create_merged_main(nondet_pairs)
         merged_ext.append(new_main)
 
         # Reorganize: externals at top, then globals, then function definitions
@@ -955,14 +1077,13 @@ class Merger:
         logger.info(f"Generated {len(checks)} equality checks")
         return checks
 
-    def _create_merged_main(self, checks, nondet_pairs):
+    def _create_merged_main(self, nondet_pairs):
         """
         Create a new main function that:
         1. Initializes global invocation counter
         2. Assigns deterministic values via pure functions using invocation counter
         3. Calls prefix1_main()
-        4. Calls prefix2_main()
-        5. Checks all non-nondet globals are equal with if statements calling reach_error()
+        4. Lets instrumented exit helpers run prefix2_main() and compare on matching exits
         """
         parser = GnuCParser()
 
@@ -978,7 +1099,6 @@ class Merger:
                 pure_assignments.append(f"{var2} = {pure_func_name}(__invocation_count++);")
 
         pure_code_str = '\n'.join(pure_assignments)
-        check_code_str = '\n'.join(checks)
 
         # Build the main function body as C code, then parse it
         main_code = f"""
@@ -986,9 +1106,6 @@ class Merger:
             {pure_code_str}
             __invocation_count = 0;
             {self.prefix1}main();
-            __invocation_count = 0;
-            {self.prefix2}main();
-            {check_code_str}
             return 0;
         }}
         """
@@ -1117,28 +1234,78 @@ class Merger:
         except Exception as e:
             logger.warning(f"Could not add reach_error function: {e}")
 
-    def _add_noop_if_missing(self, ext_list):
-        """Add __noop function with empty body at top if not already present."""
-        for ext in ext_list:
-            if isinstance(ext, c_ast.FuncDef) and ext.decl.name == "__noop":
-                return
-            if isinstance(ext, c_ast.Decl) and ext.name == "__noop":
-                return
+    def _add_termination_flag_globals(self, ext_list, termination_kinds):
+        """Declare side-specific global flags for used termination kinds."""
+        if not termination_kinds:
+            return
+
+        existing_globals = {
+            ext.name
+            for ext in ext_list
+            if isinstance(ext, c_ast.Decl) and not isinstance(ext.type, c_ast.FuncDecl) and ext.name
+        }
 
         parser = GnuCParser()
-        noop_code = "void __noop() { }"
-        try:
-            parsed = parser.parse(noop_code)
-            noop_func = parsed.ext[0]
-            ext_list.insert(0, noop_func)
-            logger.info("Added __noop() function at top of merged code")
-        except Exception as e:
-            logger.warning(f"Could not add __noop function: {e}")
+        for kind in termination_kinds:
+            for side in ("original", "mutant"):
+                var_name = f"{side}_reached_{kind}_1"
+                if var_name in existing_globals:
+                    continue
+
+                parsed = parser.parse(f"int {var_name} = 0;")
+                ext_list.insert(0, parsed.ext[0])
+                existing_globals.add(var_name)
+                logger.info("Added termination flag global: int %s = 0;", var_name)
+
+    def _add_termination_helpers(self, ext_list, termination_kinds, checks):
+        """Add helper functions used by rewritten termination calls."""
+        if not termination_kinds:
+            return
+
+        existing_funcs = {
+            ext.decl.name
+            for ext in ext_list
+            if isinstance(ext, c_ast.FuncDef)
+        }
+
+        parser = GnuCParser()
+        check_code = "\n".join(checks)
+
+        for kind in termination_kinds:
+            mutant_helper = f"__mark_mutant_{kind}_1"
+            if mutant_helper not in existing_funcs:
+                mutant_code = f"""
+                void {mutant_helper}() {{
+                    mutant_reached_{kind}_1 = 1;
+                    if (original_reached_{kind}_1 != 1) {{
+                        reach_error();
+                    }} else {{
+                        {check_code}
+                    }}
+                }}
+                """
+                parsed = parser.parse(mutant_code)
+                ext_list.insert(0, parsed.ext[0])
+                existing_funcs.add(mutant_helper)
+                logger.info("Added termination helper `%s`", mutant_helper)
+
+            original_helper = f"__handle_original_{kind}_1"
+            if original_helper not in existing_funcs:
+                original_code = f"""
+                void {original_helper}() {{
+                    original_reached_{kind}_1 = 1;
+                    __invocation_count = 0;
+                    {self.prefix2}main();
+                }}
+                """
+                parsed = parser.parse(original_code)
+                ext_list.insert(0, parsed.ext[0])
+                existing_funcs.add(original_helper)
+                logger.info("Added termination helper `%s`", original_helper)
 
     def generate_code(self, merged_ast):
         """Generate C code from merged AST."""
         generated = self.generator.visit(merged_ast)
-        generated = normalize_comma_assert_statements(generated)
         return ensure_asm_volatile_semicolons(generated)
 
 

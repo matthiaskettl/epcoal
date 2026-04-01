@@ -92,6 +92,11 @@ def main():
     parser.add_argument("--output-dir", default="output", help="Directory for generated files")
     parser.add_argument("--original-prefix", default="original_", help="Prefix for original transformation")
     parser.add_argument("--mutant-prefix", default="mutant_", help="Prefix for mutant transformation")
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Pass benchmark options (--benchmark --heap 13000M) to CPAchecker",
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir).resolve()
@@ -157,20 +162,19 @@ def main():
         return 1
 
     # 4) Run CPAchecker
-    result, _ = run_timed_step(
-        "cpachecker",
+    cpachecker_cmd = [str(cpachecker)]
+    if args.benchmark:
+        cpachecker_cmd.extend(["--benchmark", "--heap", "13000M"])
+    cpachecker_cmd.extend(
         [
-            str(cpachecker),
-            "--benchmark",
-            "--heap",
-            "13000M",
             "--32" if args.datamodel == 32 else "--64",
             "--spec",
             "sv-comp-reachability",
             str(merged_out),
-        ],
-        cwd=workdir,
+        ]
     )
+
+    result, _ = run_timed_step("cpachecker", cpachecker_cmd, cwd=workdir)
 
     combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
     verdict = classify_cpachecker_output(combined_output)
