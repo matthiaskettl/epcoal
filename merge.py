@@ -10,11 +10,15 @@ from pathlib import Path
 sys.path.append(str((Path(__file__).absolute().parent / "lib" / "pip")))
 
 from pycparser import c_ast
-from pycparserext.ext_c_parser import GnuCParser
+from pycparserext.ext_c_parser import GnuCParser, FuncDeclExt
 from pycparserext.ext_c_generator import GnuCGenerator
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_func_decl_type(node_type):
+    return isinstance(node_type, (c_ast.FuncDecl, FuncDeclExt))
 
 
 def ensure_asm_volatile_semicolons(content: str) -> str:
@@ -540,7 +544,7 @@ class GlobalVariableExtractor(c_ast.NodeVisitor):
 
     def visit_FileAST(self, node):
         for ext in node.ext:
-            if isinstance(ext, c_ast.Decl) and not isinstance(ext.type, c_ast.FuncDecl):
+            if isinstance(ext, c_ast.Decl) and not _is_func_decl_type(ext.type):
                 if not ext.name:
                     # Anonymous declarations cannot be matched across files by name.
                     logger.debug("Skipping anonymous global declaration during extraction")
@@ -1022,7 +1026,7 @@ class Merger:
                 continue
 
             # External function declarations (Decl with FuncDecl type)
-            if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl):
+            if isinstance(ext, c_ast.Decl) and _is_func_decl_type(ext.type):
                 sig = _normalize_decl_text(self.generator.visit(ext))
                 if sig in seen_external_signatures:
                     logger.debug(f"Skipped duplicate external function signature: {ext.name}")
@@ -1076,7 +1080,7 @@ class Merger:
         pre_decls = []
         named_globals = []
         for decl in ordered_decls:
-            if isinstance(decl, c_ast.Decl) and not isinstance(decl.type, c_ast.FuncDecl) and decl.name is not None:
+            if isinstance(decl, c_ast.Decl) and not _is_func_decl_type(decl.type) and decl.name is not None:
                 named_globals.append(decl)
             else:
                 pre_decls.append(decl)
@@ -1084,8 +1088,8 @@ class Merger:
         result = pre_decls + forward_func_decls + named_globals + func_defs_order
         logger.info(
             f"Reorganized: {len([n for n in ordered_decls if isinstance(n, c_ast.Typedef)])} typedefs, "
-            f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and isinstance(n.type, c_ast.FuncDecl)])} external functions, "
-            f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and not isinstance(n.type, c_ast.FuncDecl)])} globals, "
+            f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and _is_func_decl_type(n.type)])} external functions, "
+            f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and not _is_func_decl_type(n.type)])} globals, "
             f"{len(func_defs_order)} function definitions"
         )
         return result
@@ -1284,7 +1288,7 @@ class Merger:
         for ext in ext_list:
             if (
                 isinstance(ext, c_ast.Decl)
-                and isinstance(ext.type, c_ast.FuncDecl)
+                and _is_func_decl_type(ext.type)
                 and ext.name
                 and ext.name.startswith("__pure_")
             ):
@@ -1333,7 +1337,7 @@ class Merger:
         for ext in ext_list:
             if (
                 isinstance(ext, c_ast.Decl)
-                and isinstance(ext.type, c_ast.FuncDecl)
+                and _is_func_decl_type(ext.type)
                 and ext.name
                 and ext.name.startswith("__VERIFIER_nondet_")
             ):
@@ -1375,7 +1379,7 @@ class Merger:
             return
 
         for ext in ext_list:
-            if isinstance(ext, c_ast.Decl) and isinstance(ext.type, c_ast.FuncDecl) and ext.name == "memcmp":
+            if isinstance(ext, c_ast.Decl) and _is_func_decl_type(ext.type) and ext.name == "memcmp":
                 return
 
         parser = GnuCParser()

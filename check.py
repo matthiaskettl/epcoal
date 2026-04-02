@@ -25,9 +25,9 @@ class TimingStats:
         measured_total = 0.0
         for name, elapsed in self.steps:
             measured_total += elapsed
-            lines.append(f"- {name}: {elapsed:.3f}s")
-        lines.append(f"- measured total: {measured_total:.3f}s")
-        lines.append(f"- wall total: {float(wall_total):.3f}s")
+            lines.append(f"- {name} (s): {elapsed:.3f}")
+        lines.append(f"- measured total (s): {measured_total:.3f}")
+        lines.append(f"- wall total (s): {float(wall_total):.3f}")
         return "\n".join(lines)
 
 
