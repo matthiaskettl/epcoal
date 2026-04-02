@@ -211,7 +211,7 @@ def main():
     # With --no-memcmp we may skip opaque comparisons. In that case, a TRUE result
     # cannot be considered fully sound, while FALSE remains a safe witness.
     if args.no_memcmp and skipped_memcmp_sites > 0 and verdict == "equivalent":
-        verdict = "unknown"
+        verdict = "equivalent?"
 
     total_elapsed = time.perf_counter() - total_start
     print(f"[timing] total: {total_elapsed:.3f}s")
