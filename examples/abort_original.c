@@ -7,7 +7,6 @@ int x;
 int test() {
   x++;
   reach_error();
-  abort();
 }
 
 int main() {

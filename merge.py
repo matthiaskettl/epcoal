@@ -996,15 +996,15 @@ class Merger:
 
     def _reorganize_declarations(self, ext_list):
         """
-        Reorganize declarations to: typedefs, external functions, globals, then functions.
-        Deduplicate typedefs, function declarations, globals, and function definitions.
+        Reorganize declarations while preserving source order as closely as possible.
+
+        Deduplicate exact duplicates, keep the first occurrence of a declaration, and
+        keep function definitions after declarations. This helps preserve dependency
+        order for types such as structs/unions/typedefs.
         """
-        typedefs = {}  # name -> Typedef
-        external_funcs = {}  # name -> Decl(FuncDecl)
-        globals_by_name = {}  # name -> Decl(non-FuncDecl)
-        globals_ordered = []  # Keep first-seen order for named and unnamed declarations
-        func_defs_by_name = {}  # name -> FuncDef
-        passthrough = []
+        ordered_decls = []
+        func_defs_by_name = {}
+        func_defs_order = []
 
         # Signatures used to deduplicate exact duplicates while keeping first occurrence.
         seen_typedef_signatures = set()
@@ -1028,11 +1028,8 @@ class Merger:
                     logger.debug(f"Skipped duplicate typedef signature: {name}")
                     continue
                 seen_typedef_signatures.add(sig)
-                if name not in typedefs:
-                    typedefs[name] = ext
-                    logger.debug(f"Added typedef: {name}")
-                else:
-                    logger.debug(f"Skipped duplicate typedef by name: {name}")
+                ordered_decls.append(ext)
+                logger.debug(f"Added typedef: {name}")
                 continue
 
             # External function declarations (Decl with FuncDecl type)
@@ -1042,12 +1039,8 @@ class Merger:
                     logger.debug(f"Skipped duplicate external function signature: {ext.name}")
                     continue
                 seen_external_signatures.add(sig)
-                # Deduplicate by name as well: keep first occurrence
-                if ext.name not in external_funcs:
-                    external_funcs[ext.name] = ext
-                    logger.debug(f"Added external function: {ext.name}")
-                else:
-                    logger.debug(f"Skipped duplicate external function: {ext.name}")
+                ordered_decls.append(ext)
+                logger.debug(f"Added external function: {ext.name}")
             # Global variable declarations (Decl without FuncDecl type)
             elif isinstance(ext, c_ast.Decl):
                 sig = _normalize_decl_text(self.generator.visit(ext))
@@ -1055,19 +1048,8 @@ class Merger:
                     logger.debug(f"Skipped duplicate global signature: {ext.name}")
                     continue
                 seen_global_signatures.add(sig)
-                if ext.name is None:
-                    # Preserve unnamed declarations such as `struct X { ... };`.
-                    # These declarations do not have a stable name key and must not
-                    # be deduplicated by name, otherwise later struct uses see
-                    # incomplete types.
-                    globals_ordered.append(ext)
-                    logger.debug("Added unnamed global/type declaration")
-                elif ext.name not in globals_by_name:
-                    globals_by_name[ext.name] = ext
-                    globals_ordered.append(ext)
-                    logger.debug(f"Added global: {ext.name}")
-                else:
-                    logger.debug(f"Skipped duplicate global by name: {ext.name}")
+                ordered_decls.append(ext)
+                logger.debug(f"Added global: {ext.name}")
             # Function definitions
             elif isinstance(ext, c_ast.FuncDef):
                 fname = ext.decl.name
@@ -1078,63 +1060,33 @@ class Merger:
                 seen_funcdef_signatures.add(sig)
                 if fname not in func_defs_by_name:
                     func_defs_by_name[fname] = ext
+                    func_defs_order.append(ext)
                     logger.debug(f"Added function definition: {fname}")
                 else:
                     logger.debug(f"Skipped duplicate function definition by name: {fname}")
             else:
-                passthrough.append(ext)
-
-        struct_like_decls = []
-        regular_globals = []
-        for decl in globals_ordered:
-            if (
-                isinstance(decl, c_ast.Decl)
-                and decl.name is None
-                and isinstance(decl.type, (c_ast.Struct, c_ast.Union, c_ast.Enum))
-            ):
-                struct_like_decls.append(decl)
-            else:
-                regular_globals.append(decl)
-
-        globals_list = regular_globals
-        func_defs = list(func_defs_by_name.values())
+                ordered_decls.append(ext)
 
         # Emit forward declarations for function definitions so globals that
         # reference function symbols in initializers (e.g., ops tables) have
         # visible declarations during binding/type checks.
         forward_func_decls = []
         seen_forward_signatures = set()
-        for fdef in func_defs:
+        for fdef in func_defs_order:
             fdecl = copy.deepcopy(fdef.decl)
             sig = _normalize_decl_text(self.generator.visit(fdecl))
             if sig in seen_forward_signatures:
                 continue
             seen_forward_signatures.add(sig)
             forward_func_decls.append(fdecl)
-        # Emit pure extern declarations first among external functions.
-        pure_externals = []
-        other_externals = []
-        for decl in external_funcs.values():
-            if decl.name and decl.name.startswith("__pure_"):
-                pure_externals.append(decl)
-            else:
-                other_externals.append(decl)
-
-        # Reconstruct: typedefs, struct-like declarations, pure externs, other externs,
-        # globals, passthrough, then function definitions.
-        result = (
-            list(typedefs.values())
-            + struct_like_decls
-            + pure_externals
-            + other_externals
-            + forward_func_decls
-            + globals_list
-            + passthrough
-            + func_defs
-        )
+        # Reconstruct: declarations in source order, then forward declarations,
+        # then function definitions.
+        result = ordered_decls + forward_func_decls + func_defs_order
         logger.info(
-            f"Reorganized: {len(typedefs)} typedefs, {len(external_funcs)} external functions, "
-            f"{len(globals_list)} globals, {len(func_defs)} function definitions"
+            f"Reorganized: {len([n for n in ordered_decls if isinstance(n, c_ast.Typedef)])} typedefs, "
+            f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and isinstance(n.type, c_ast.FuncDecl)])} external functions, "
+            f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and not isinstance(n.type, c_ast.FuncDecl)])} globals, "
+            f"{len(func_defs_order)} function definitions"
         )
         return result
 

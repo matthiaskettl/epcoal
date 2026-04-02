@@ -35,6 +35,25 @@ def blank(pattern: str, string: str, add_newline=False):
     return blanked_line
 
 
+def rewrite_unsupported_builtins(content: str) -> str:
+    content = re.sub(r"\b__builtin_unreachable\s*\(\s*\)", "abort()", content)
+
+    pattern = re.compile(
+        r"__builtin_va_arg\s*\(\s*(?P<va>[^,]+?)\s*,\s*(?P<ty>[^)]+?)\s*\)",
+        re.S,
+    )
+
+    def repl(m):
+        va = " ".join(m.group("va").split())
+        ty = " ".join(m.group("ty").split())
+        return f"(({ty}) __va_arg({va}))"
+
+    res = pattern.sub(repl, content)
+    if res == content:
+        print("Warning: No __builtin_va_arg occurrences were rewritten. This may cause issues if the input code uses this builtin.")
+    return res
+
+
 def rewrite_cproblem_pycparserext(content: str) -> str:
     """
     Rewrites the given content to be compatible with pycparserext.
@@ -288,6 +307,37 @@ def rewrite_unsupported_builtins(content: str) -> str:
     keeps the control-flow intent explicit and analyzable.
     """
     return re.sub(r"\b__builtin_unreachable\s*\(\s*\)", "abort()", content)
+
+
+class ScalarCharInitListTransformer(c_ast.NodeVisitor):
+    """Turn scalar char declarations with multi-item init lists into arrays.
+
+    Some benchmark-generated `.modinfo` declarations are emitted as scalar
+    `const char` declarations with brace-enclosed character lists. That shape
+    is not valid for downstream parsers, but it is semantically an array of
+    bytes, so we can recover a proper array dimension from the initializer.
+    """
+
+    @staticmethod
+    def _is_char_type(decl_type):
+        if not isinstance(decl_type, c_ast.TypeDecl):
+            return False
+        inner_type = decl_type.type
+        if not isinstance(inner_type, c_ast.IdentifierType):
+            return False
+        return inner_type.names in (["char"], ["signed", "char"], ["unsigned", "char"])
+
+    def visit_Decl(self, node):
+        if (
+            isinstance(node.init, c_ast.InitList)
+            and self._is_char_type(node.type)
+            and node.init.exprs is not None
+            and len(node.init.exprs) > 1
+        ):
+            dim = c_ast.Constant(type="int", value=str(len(node.init.exprs)))
+            node.type = c_ast.ArrayDecl(type=node.type, dim=dim, dim_quals=[])
+
+        self.generic_visit(node)
 
 
 def _is_func_decl_type(node_type):
@@ -859,6 +909,7 @@ class Transformer:
         code = blank_asm_volatile_with_brackets(code)
         code = rewrite_unsupported_builtins(code)
         code = rewrite_cproblem_pycparserext(code)
+        code = rewrite_unsupported_builtins(code)
         parser = GnuCParser()
         self.ast = parser.parse(code)
         self.generator = GnuCGenerator()
@@ -866,6 +917,9 @@ class Transformer:
 
     def transform(self):
         """Apply all transformations and return the transformed AST."""
+        # Normalize scalar char initializers like `.modinfo` payloads into arrays.
+        ScalarCharInitListTransformer().visit(self.ast)
+
         # Preprocessing: handle reach_error -> abort
         reach_error_transformer = ReachErrorTransformer()
         reach_error_transformer.visit(self.ast)
@@ -905,13 +959,26 @@ class Transformer:
                 passthrough_nodes.append(ext)
             # Skip other Decl nodes - they're local variables that got globalized
 
-        # Reconstruct: externals, typedefs, original globals, globalized locals, passthrough, then functions
+        def _coord_key(node, index):
+            coord = getattr(node, "coord", None)
+            if coord is None:
+                return (1, index)
+            line = getattr(coord, "line", None)
+            column = getattr(coord, "column", None)
+            return (
+                0,
+                line if line is not None else 0,
+                column if column is not None else 0,
+                index,
+            )
+
+        # Preserve source order as closely as possible for declarations.
+        ordered_decls = list(enumerate(external_func_decls + t.typedef_decls + original_global_decls + t.global_decls + passthrough_nodes))
+        ordered_decls.sort(key=lambda item: _coord_key(item[1], item[0]))
+
+        # Reconstruct: declarations in source order, then function definitions.
         self.ast.ext = (
-            external_func_decls
-            + t.typedef_decls
-            + original_global_decls
-            + t.global_decls
-            + passthrough_nodes
+            [node for _, node in ordered_decls]
             + func_defs
         )
 
