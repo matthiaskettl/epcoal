@@ -9,10 +9,12 @@
   <!-- DEFINITIONS-->
 
   <columns>
-    <column title="original">[timing] transform original: </column>
-    <column title="mutant">[timing] transform mutant: </column>
-    <column title="merge">[timing] merge: </column>
-    <column title="cpachecker">[timing] cpachecker: </column>
-    <column title="total">[timing] total: </column>
+    <column title="create transformer original">- create transformer original: </column>
+    <column title="transform original">- transform original: </column>
+    <column title="create transformer mutant">- create transformer mutant: </column>
+    <column title="transform mutant">- transform mutant: </column>
+    <column title="merge">- merge: </column>
+    <column title="measured total">- measured total: </column>
+    <column title="total">- wall total: </column>
   </columns>
 </benchmark>
