@@ -70,10 +70,20 @@ def run_timed_python_step(step_name, fn, stats=None):
 
 
 def classify_cpachecker_output(output_text):
+    crashed = []
+    for line in output_text.splitlines():
+        if "Exception in thread" in line:
+            crashed.append(line)
+    if len(crashed) > 0:
+        logger.warning("CPAchecker appears to have crashed. Detected exception lines:")
+        for exc in crashed:
+            logger.warning("  %s", exc)
     if "Verification result: TRUE" in output_text:
         return "equivalent"
     if "Verification result: FALSE" in output_text:
         return "not equivalent"
+    if len(crashed) > 0:
+        return "crash"
     return "unknown"
 
 
@@ -283,8 +293,8 @@ def main():
     finally:
         signal.signal(signal.SIGTERM, prev_sigterm)
         total_elapsed = time.perf_counter() - total_start
-        print(f"Final verdict: {verdict}")
         print(timing_stats.render(total_elapsed))
+        print(f"Final verdict: {verdict}")
 
 
 if __name__ == "__main__":
