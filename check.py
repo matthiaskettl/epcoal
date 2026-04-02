@@ -2,14 +2,42 @@
 
 import argparse
 import importlib.util
+import logging
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
+
+
+class TimingStats:
+    def __init__(self):
+        self.steps = []
+
+    def add(self, name, elapsed):
+        self.steps.append((name, float(elapsed)))
+
+    def render(self, wall_total):
+        lines = ["Timing statistics:"]
+        measured_total = 0.0
+        for name, elapsed in self.steps:
+            measured_total += elapsed
+            lines.append(f"- {name}: {elapsed:.3f}s")
+        lines.append(f"- measured total: {measured_total:.3f}s")
+        lines.append(f"- wall total: {float(wall_total):.3f}s")
+        return "\n".join(lines)
+
+
+def setup_logging(level_name="INFO"):
+    level = getattr(logging, str(level_name).upper(), logging.WARNING)
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+
+
 def run_command(cmd, cwd):
-    print("$", " ".join(str(part) for part in cmd))
+    logger.info("$ %s", " ".join(str(part) for part in cmd))
     result = subprocess.run(
         cmd,
         cwd=str(cwd),
@@ -18,27 +46,26 @@ def run_command(cmd, cwd):
         check=False,
     )
 
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.stderr:
-        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
-
     return result
 
 
-def run_timed_step(step_name, cmd, cwd):
+def run_timed_step(step_name, cmd, cwd, stats=None):
     start = time.perf_counter()
     result = run_command(cmd, cwd)
     elapsed = time.perf_counter() - start
-    print(f"[timing] {step_name}: {elapsed:.3f}s")
+    if stats is not None:
+        stats.add(step_name, elapsed)
+    logger.info("[timing] %s: %.3fs", step_name, elapsed)
     return result, elapsed
 
 
-def run_timed_python_step(step_name, fn):
+def run_timed_python_step(step_name, fn, stats=None):
     start = time.perf_counter()
     value = fn()
     elapsed = time.perf_counter() - start
-    print(f"[timing] {step_name}: {elapsed:.3f}s")
+    if stats is not None:
+        stats.add(step_name, elapsed)
+    logger.info("[timing] %s: %.3fs", step_name, elapsed)
     return value, elapsed
 
 
@@ -66,6 +93,10 @@ def _load_symbol_from_file(module_path, symbol_name):
 
 def main():
     total_start = time.perf_counter()
+    timing_stats = TimingStats()
+    verdict = "unknown"
+    skipped_memcmp_sites = 0
+    shutdown_signal = None
 
     parser = argparse.ArgumentParser(
         description="Transform original/mutant C files, merge them, and run CPAchecker."
@@ -90,6 +121,12 @@ def main():
         help="Path to CPAchecker executable",
     )
     parser.add_argument("--output-dir", default="output", help="Directory for generated files")
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="Logging verbosity",
+    )
     parser.add_argument("--original-prefix", default="original_", help="Prefix for original transformation")
     parser.add_argument("--mutant-prefix", default="mutant_", help="Prefix for mutant transformation")
     parser.add_argument(
@@ -114,119 +151,140 @@ def main():
         help="Compare only globals that are assigned/updated in either version (heuristic)",
     )
     args = parser.parse_args()
+    setup_logging(args.log_level)
 
-    workdir = Path(args.workdir).resolve()
-    original_in = Path(args.original).resolve()
-    mutant_in = Path(args.mutant).resolve()
-    cpachecker = Path(args.cpachecker).resolve()
+    def _handle_shutdown(signum, _frame):
+        nonlocal shutdown_signal
+        shutdown_signal = signal.Signals(signum).name
+        raise KeyboardInterrupt
 
-    transformer_py = workdir / "transformer.py"
-    merge_py = workdir / "merge.py"
-    output_dir = (workdir / args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    merged_out = output_dir / "merged.c"
+    try:
+        workdir = Path(args.workdir).resolve()
+        original_in = Path(args.original).resolve()
+        mutant_in = Path(args.mutant).resolve()
+        cpachecker = Path(args.cpachecker).resolve()
 
-    for required in (transformer_py, merge_py, original_in, mutant_in):
-        if not required.exists():
-            print(f"Error: required path does not exist: {required}", file=sys.stderr)
+        transformer_py = workdir / "transformer.py"
+        merge_py = workdir / "merge.py"
+        output_dir = (workdir / args.output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        merged_out = output_dir / "merged.c"
+
+        for required in (transformer_py, merge_py, original_in, mutant_in):
+            if not required.exists():
+                logger.error("required path does not exist: %s", required)
+                return 2
+
+        if not cpachecker.exists():
+            logger.error("CPAchecker executable not found at: %s", cpachecker)
             return 2
 
-    if not cpachecker.exists():
-        print(f"Error: CPAchecker executable not found at: {cpachecker}", file=sys.stderr)
-        return 2
+        try:
+            Transformer = _load_symbol_from_file(transformer_py, "Transformer")
+            Merger = _load_symbol_from_file(merge_py, "Merger")
+        except Exception as e:
+            logger.error("Error loading transformer/merge modules from workdir: %s", e)
+            return 2
 
-    try:
-        Transformer = _load_symbol_from_file(transformer_py, "Transformer")
-        Merger = _load_symbol_from_file(merge_py, "Merger")
-    except Exception as e:
-        print(f"Error loading transformer/merge modules from workdir: {e}", file=sys.stderr)
-        return 2
+        # 1) Transform original (in-memory AST)
+        try:
+            original_code = original_in.read_text()
+            original_transformer, _ = run_timed_python_step(
+                "create transformer original",
+                lambda: Transformer(original_code, prefix=args.original_prefix),
+                stats=timing_stats,
+            )
+            original_ast, _ = run_timed_python_step(
+                "transform original", original_transformer.transform, stats=timing_stats
+            )
+        except Exception as e:
+            logger.error("Transformation failed for original program: %s", e)
+            return 1
 
-    # 1) Transform original (in-memory AST)
-    try:
-        original_code = original_in.read_text()
-        original_transformer, _ = run_timed_python_step(
-            "create transformer original",
-            lambda: Transformer(original_code, prefix=args.original_prefix),
-        )
-        original_ast, _ = run_timed_python_step("transform original", original_transformer.transform)
-    except Exception as e:
-        print(f"Transformation failed for original program: {e}", file=sys.stderr)
-        return 1
+        # 2) Transform mutant (in-memory AST)
+        try:
+            mutant_code = mutant_in.read_text()
+            mutant_transformer, _ = run_timed_python_step(
+                "create transformer mutant",
+                lambda: Transformer(mutant_code, prefix=args.mutant_prefix),
+                stats=timing_stats,
+            )
+            mutant_ast, _ = run_timed_python_step(
+                "transform mutant", mutant_transformer.transform, stats=timing_stats
+            )
+        except Exception as e:
+            logger.error("Transformation failed for mutant program: %s", e)
+            return 1
 
-    # 2) Transform mutant (in-memory AST)
-    try:
-        mutant_code = mutant_in.read_text()
-        mutant_transformer, _ = run_timed_python_step(
-            "create transformer mutant",
-            lambda: Transformer(mutant_code, prefix=args.mutant_prefix),
-        )
-        mutant_ast, _ = run_timed_python_step("transform mutant", mutant_transformer.transform)
-    except Exception as e:
-        print(f"Transformation failed for mutant program: {e}", file=sys.stderr)
-        return 1
+        # 3) Merge from ASTs and write only final merged C
+        try:
+            merger = Merger.from_asts(
+                original_ast,
+                args.original_prefix,
+                mutant_ast,
+                args.mutant_prefix,
+                no_memcmp=args.no_memcmp,
+                pointer_policy=args.pointer_policy,
+                compare_modified_only=args.compare_modified_only,
+            )
+            merged_ast, _ = run_timed_python_step("merge", merger.merge, stats=timing_stats)
+            merged_code = merger.generate_code(merged_ast)
+            merged_out.write_text(merged_code)
+        except Exception as e:
+            logger.exception("Merge step failed: %s", e)
+            return 1
 
-    # 3) Merge from ASTs and write only final merged C
-    try:
-        merger = Merger.from_asts(
-            original_ast,
-            args.original_prefix,
-            mutant_ast,
-            args.mutant_prefix,
-            no_memcmp=args.no_memcmp,
-            pointer_policy=args.pointer_policy,
-            compare_modified_only=args.compare_modified_only,
-        )
-        merged_ast, _ = run_timed_python_step("merge", merger.merge)
-        merged_code = merger.generate_code(merged_ast)
-        merged_out.write_text(merged_code)
-    except Exception as e:
-        print(f"Merge step failed: {e}", file=sys.stderr)
-        return 1
-
-    # 4) Run CPAchecker
-    cpachecker_cmd = [str(cpachecker)]
-    if args.benchmark:
-        cpachecker_cmd.extend(["--benchmark", "--heap", "13000M"])
-    cpachecker_cmd.extend(
-        [
-            "--32" if args.datamodel == 32 else "--64",
-            "--spec",
-            "sv-comp-reachability",
-            str(merged_out),
-        ]
-    )
-
-    result, _ = run_timed_step("cpachecker", cpachecker_cmd, cwd=workdir)
-
-    combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
-    verdict = classify_cpachecker_output(combined_output)
-    skipped_memcmp_sites = int(getattr(merger, "skipped_memcmp_sites", 0) or 0)
-    if skipped_memcmp_sites > 0:
-        print(
-            f"[info] {skipped_memcmp_sites} opaque comparison site(s) were skipped due to --no-memcmp"
+        # 4) Run CPAchecker
+        cpachecker_cmd = [str(cpachecker)]
+        if args.benchmark:
+            cpachecker_cmd.extend(["--benchmark", "--heap", "13000M"])
+        cpachecker_cmd.extend(
+            [
+                "--32" if args.datamodel == 32 else "--64",
+                "--spec",
+                "sv-comp-reachability",
+                str(merged_out),
+            ]
         )
 
-    # With --no-memcmp we may skip opaque comparisons. In that case, a TRUE result
-    # cannot be considered fully sound, while FALSE remains a safe witness.
-    if args.no_memcmp and skipped_memcmp_sites > 0 and verdict == "equivalent":
-        verdict = "equivalent?"
+        result, _ = run_timed_step("cpachecker", cpachecker_cmd, cwd=workdir, stats=timing_stats)
 
-    total_elapsed = time.perf_counter() - total_start
-    print(f"[timing] total: {total_elapsed:.3f}s")
-    if args.no_memcmp and skipped_memcmp_sites > 0:
-        print(
-            f"[info] skipped {skipped_memcmp_sites} opaque comparison site(s) due to --no-memcmp"
-        )
-    print(f"\nFinal verdict: {verdict}")
+        combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
+        verdict = classify_cpachecker_output(combined_output)
+        skipped_memcmp_sites = int(getattr(merger, "skipped_memcmp_sites", 0) or 0)
+        if skipped_memcmp_sites > 0:
+            logger.info(
+                "%d opaque comparison site(s) were skipped due to --no-memcmp",
+                skipped_memcmp_sites,
+            )
 
-    # Keep FALSE as a normal, successful verification outcome.
-    if verdict in ("equivalent", "not equivalent"):
-        return 0
+        # With --no-memcmp we may skip opaque comparisons. In that case, a TRUE result
+        # cannot be considered fully sound, while FALSE remains a safe witness.
+        if args.no_memcmp and skipped_memcmp_sites > 0 and verdict == "equivalent":
+            verdict = "equivalent?"
 
-    # Unknown/crash should be surfaced to callers and automation.
-    return result.returncode if result.returncode != 0 else 1
+        # Keep FALSE as a normal, successful verification outcome.
+        if verdict in ("equivalent", "not equivalent", "equivalent?"):
+            return 0
+
+        # Unknown/crash should be surfaced to callers and automation.
+        return result.returncode if result.returncode != 0 else 1
+    except KeyboardInterrupt:
+        if shutdown_signal:
+            logger.warning("Shutdown requested via %s", shutdown_signal)
+        else:
+            logger.warning("Interrupted by user")
+        verdict = "interrupted"
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        total_elapsed = time.perf_counter() - total_start
+        print(f"Final verdict: {verdict}")
+        print(timing_stats.render(total_elapsed))
 
 
 if __name__ == "__main__":

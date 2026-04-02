@@ -186,7 +186,8 @@ class AssertionBuilder:
             return f"if((({lhs}) == 0) != (({rhs}) == 0)) {{ reach_error(); }}"
 
         if policy == "ignore-funcptr" and ptr_kind == "funcptr":
-            return "/* function-pointer equality ignored by policy */"
+            logger.warning("Ignoring function pointer comparison for `%s` due to policy", lhs)
+            return ""
 
         return f"if({lhs} != {rhs}) {{ reach_error(); }}"
 
@@ -198,7 +199,7 @@ class AssertionBuilder:
         if dim is None:
             # Unbounded array, can't compare
             logger.warning(f"Cannot compare unbounded array {var1}")
-            return f"/* Cannot compare unbounded array {var1} */"
+            return ""
 
         # Generate the dimension value
         dim_code = self._get_array_dim_code(dim)
@@ -224,7 +225,7 @@ class AssertionBuilder:
             return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
 
         self.skipped_memcmp_sites += 1
-        return "/* skipped opaque comparison due to --no-memcmp */"
+        return ""
 
     def _build_struct_assert(self, lhs, rhs, struct_node):
         """Build field-by-field comparison for structs."""
@@ -1541,8 +1542,7 @@ def main():
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(merged_code)
-
-        print(f"Saved merged file to: {output_path.resolve()}")
+        logger.info("Saved merged file to: %s", output_path.resolve())
     except Exception as e:
         logger.exception("Error during merge: %s", e)
         sys.exit(1)

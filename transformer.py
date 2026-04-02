@@ -50,7 +50,9 @@ def rewrite_unsupported_builtins(content: str) -> str:
 
     res = pattern.sub(repl, content)
     if res == content:
-        print("Warning: No __builtin_va_arg occurrences were rewritten. This may cause issues if the input code uses this builtin.")
+        logger.warning(
+            "No __builtin_va_arg occurrences were rewritten. This may cause issues if the input code uses this builtin."
+        )
     return res
 
 
@@ -1046,7 +1048,7 @@ if __name__ == "__main__":
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(transformed_code)
-        print(f"Saved transformed file to: {output_path.resolve()}")
+        logger.info("Saved transformed file to: %s", output_path.resolve())
     except IOError as e:
         logger.error("Error writing to output file %s: %s", output_path, e)
         sys.exit(1)
