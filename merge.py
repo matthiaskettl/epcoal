@@ -147,6 +147,7 @@ class AssertionBuilder:
         self.pointer_policy = pointer_policy
         self.generator = GnuCGenerator()
         self._loop_counter = 0
+        self.skipped_memcmp_sites = 0
 
     def build_assert_equal(self, var_name, type_obj):
         """
@@ -222,22 +223,8 @@ class AssertionBuilder:
         if not self.no_memcmp:
             return f"if(memcmp(&( {lhs} ), &( {rhs} ), sizeof({lhs})) != 0) {{ reach_error(); }}"
 
-        idx = f"_cmp_b{self._loop_counter}"
-        self._loop_counter += 1
-        a_ptr = f"_cmp_a{self._loop_counter}"
-        self._loop_counter += 1
-        b_ptr = f"_cmp_bptr{self._loop_counter}"
-        self._loop_counter += 1
-        return (
-            "{ "
-            f"unsigned long {idx}; "
-            f"const unsigned char *{a_ptr} = (const unsigned char *)&({lhs}); "
-            f"const unsigned char *{b_ptr} = (const unsigned char *)&({rhs}); "
-            f"for ({idx} = 0; {idx} < sizeof({lhs}); {idx}++) {{ "
-            f"if ({a_ptr}[{idx}] != {b_ptr}[{idx}]) {{ reach_error(); }} "
-            "} "
-            "}"
-        )
+        self.skipped_memcmp_sites += 1
+        return "/* skipped opaque comparison due to --no-memcmp */"
 
     def _build_struct_assert(self, lhs, rhs, struct_node):
         """Build field-by-field comparison for structs."""
@@ -824,6 +811,7 @@ class Merger:
         self.no_memcmp = no_memcmp
         self.pointer_policy = pointer_policy
         self.compare_modified_only = compare_modified_only
+        self.skipped_memcmp_sites = 0
 
         if ast1 is not None and ast2 is not None:
             self.ast1 = ast1
@@ -1079,9 +1067,20 @@ class Merger:
                 continue
             seen_forward_signatures.add(sig)
             forward_func_decls.append(fdecl)
-        # Reconstruct: declarations in source order, then forward declarations,
-        # then function definitions.
-        result = ordered_decls + forward_func_decls + func_defs_order
+        # Reconstruct with dependency-safe ordering:
+        # 1) type/extern/passthrough declarations in original order
+        # 2) forward declarations for function definitions
+        # 3) named globals (which may reference function symbols in initializers)
+        # 4) function definitions
+        pre_decls = []
+        named_globals = []
+        for decl in ordered_decls:
+            if isinstance(decl, c_ast.Decl) and not isinstance(decl.type, c_ast.FuncDecl) and decl.name is not None:
+                named_globals.append(decl)
+            else:
+                pre_decls.append(decl)
+
+        result = pre_decls + forward_func_decls + named_globals + func_defs_order
         logger.info(
             f"Reorganized: {len([n for n in ordered_decls if isinstance(n, c_ast.Typedef)])} typedefs, "
             f"{len([n for n in ordered_decls if isinstance(n, c_ast.Decl) and isinstance(n.type, c_ast.FuncDecl)])} external functions, "
@@ -1203,6 +1202,8 @@ class Merger:
             check_stmt = builder.build_assert_equal(base_name, decl1.type)
             checks.append(check_stmt)
             logger.debug(f"Added check for {base_name}: {check_stmt}")
+
+        self.skipped_memcmp_sites = builder.skipped_memcmp_sites
 
         logger.info(f"Generated {len(checks)} equality checks")
         return checks
@@ -1508,7 +1509,7 @@ def main():
     parser.add_argument(
         "--no-memcmp",
         action="store_true",
-        help="Use byte-wise loop fallback instead of memcmp for opaque comparisons",
+        help="Skip opaque fallback comparisons that would otherwise use memcmp",
     )
     parser.add_argument(
         "--pointer-policy",

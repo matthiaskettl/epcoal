@@ -100,7 +100,7 @@ def main():
     parser.add_argument(
         "--no-memcmp",
         action="store_true",
-        help="Use byte-wise loop fallback instead of memcmp for opaque comparisons",
+        help="Skip opaque fallback comparisons that would otherwise use memcmp",
     )
     parser.add_argument(
         "--pointer-policy",
@@ -202,9 +202,23 @@ def main():
 
     combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
     verdict = classify_cpachecker_output(combined_output)
+    skipped_memcmp_sites = int(getattr(merger, "skipped_memcmp_sites", 0) or 0)
+    if skipped_memcmp_sites > 0:
+        print(
+            f"[info] {skipped_memcmp_sites} opaque comparison site(s) were skipped due to --no-memcmp"
+        )
+
+    # With --no-memcmp we may skip opaque comparisons. In that case, a TRUE result
+    # cannot be considered fully sound, while FALSE remains a safe witness.
+    if args.no_memcmp and skipped_memcmp_sites > 0 and verdict == "equivalent":
+        verdict = "unknown"
 
     total_elapsed = time.perf_counter() - total_start
     print(f"[timing] total: {total_elapsed:.3f}s")
+    if args.no_memcmp and skipped_memcmp_sites > 0:
+        print(
+            f"[info] skipped {skipped_memcmp_sites} opaque comparison site(s) due to --no-memcmp"
+        )
     print(f"\nFinal verdict: {verdict}")
 
     # Keep FALSE as a normal, successful verification outcome.
