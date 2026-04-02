@@ -171,6 +171,12 @@ def main() -> None:
     default=None,
     help="Output XML path (default: overwrite template file)",
   )
+  parser.add_argument(
+    "--cpu-model",
+    type=str,
+    default="Intel Xeon E3-1230 v5 @ 3.40 GHz",
+    help="CPU model string to use in the generated benchmark XML (default: %(default)s)",
+  )
 
   args = parser.parse_args()
 
@@ -181,6 +187,7 @@ def main() -> None:
 
   definitions = create_run_definitions(args.csv)
   template_content = args.template.read_text(encoding="utf-8")
+  template_content = template_content.replace("CPUMODEL", args.cpu_model)
   final_content = inject_into_template(template_content, definitions)
 
   output_path = args.output if args.output is not None else args.template

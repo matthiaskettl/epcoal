@@ -1,3 +1,5 @@
+CPU_MODEL ?= Intel Xeon E3-1230 v5 @ 3.40 GHz
+
 # install requirements txt to lib/pip
 lib/pip:
 	pip3 install -r requirements.txt --target=lib/pip
@@ -22,6 +24,6 @@ prepare-benchexec:
 
 prepare-bench-defs:
 	@if [ ! -d benchmark/sv-benchmarks ]; then echo "Error: benchmark/sv-benchmarks not found"; exit 1; fi
-	find benchmark/ -maxdepth 1 -name "*.csv" -exec ./benchmark/generate.py {} --output {}.xml \;
+	find benchmark/ -maxdepth 1 -name "*_equivalent_mutants.csv" -exec ./benchmark/generate.py {} --cpu-model="${CPU_MODEL}" --output {}.xml \;
 
 prepare-benchmarks: prepare-benchexec prepare-bench-defs
