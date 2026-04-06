@@ -2,7 +2,7 @@ CPU_MODEL ?= Intel Xeon E3-1230 v5 @ 3.40 GHz
 
 # install requirements txt to lib/pip
 lib/pip:
-	pip3 install -r requirements.txt --target=lib/pip
+	pip3 install -r requirements.txt --target=lib/pip --upgrade
 
 lib/cpachecker:
 	rm -rf lib/cpachecker
@@ -27,3 +27,7 @@ prepare-bench-defs:
 	find benchmark/ -maxdepth 1 -name "*_equivalent_mutants.csv" -exec ./benchmark/generate.py {} --cpu-model="${CPU_MODEL}" --output {}.xml \;
 
 prepare-benchmarks: prepare-benchexec prepare-bench-defs
+
+analysis:
+	./benchmark/create_table.py --latest
+	./benchmark/analyze_tables.py

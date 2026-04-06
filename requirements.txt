@@ -1,1 +1,3 @@
 pycparserext @ git+https://github.com/marian-lingsch/pycparserext@main
+pandas
+matplotlib
