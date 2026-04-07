@@ -164,7 +164,10 @@ def plot_metric_by_status(frame: pd.DataFrame, metric: str, ylabel: str, output_
 
     fig, ax = plt.subplots(figsize=(10, 6))
     if data:
-        box = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
+        try:
+            box = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
+        except TypeError:
+            box = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
         for patch in box["boxes"]:
             patch.set_facecolor("#60a5fa")
             patch.set_alpha(0.75)
