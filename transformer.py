@@ -35,25 +35,142 @@ def blank(pattern: str, string: str, add_newline=False):
     return blanked_line
 
 
-def rewrite_unsupported_builtins(content: str) -> str:
-    content = re.sub(r"\b__builtin_unreachable\s*\(\s*\)", "abort()", content)
+def rewrite_builtin_va_arg(content: str) -> str:
+    """Rewrite `__builtin_va_arg(expr, type)` into a parser-friendly form.
 
-    pattern = re.compile(
-        r"__builtin_va_arg\s*\(\s*(?P<va>[^,]+?)\s*,\s*(?P<ty>[^)]+?)\s*\)",
-        re.S,
-    )
+    Handles nested parentheses in both arguments, e.g.:
+    `__builtin_va_arg(p, __typeof__(on_off->optarg))`.
+    """
 
-    def repl(m):
-        va = " ".join(m.group("va").split())
-        ty = " ".join(m.group("ty").split())
-        return f"(({ty}) __va_arg({va}))"
+    token = "__builtin_va_arg"
+    n = len(content)
+    i = 0
+    out = []
+    replaced = 0
 
-    res = pattern.sub(repl, content)
-    if res == content:
+    def _is_ident_char(ch: str) -> bool:
+        return ch.isalnum() or ch == "_"
+
+    while i < n:
+        start = content.find(token, i)
+        if start == -1:
+            out.append(content[i:])
+            break
+
+        out.append(content[i:start])
+
+        # Not part of a larger identifier.
+        if start > 0 and _is_ident_char(content[start - 1]):
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        j = start + len(token)
+        if j < n and _is_ident_char(content[j]):
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        while j < n and content[j].isspace():
+            j += 1
+
+        if j >= n or content[j] != "(":
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        # Parse first argument until top-level comma.
+        arg1_start = j + 1
+        k = arg1_start
+        depth = 0
+        in_string = None
+        escaped = False
+        comma_pos = -1
+
+        while k < n:
+            ch = content[k]
+            if in_string is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = None
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    comma_pos = k
+                    break
+            k += 1
+
+        if comma_pos == -1:
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        arg1 = content[arg1_start:comma_pos].strip()
+
+        # Parse second argument until matching ')' of builtin call.
+        arg2_start = comma_pos + 1
+        while arg2_start < n and content[arg2_start].isspace():
+            arg2_start += 1
+
+        k = arg2_start
+        depth = 0
+        in_string = None
+        escaped = False
+        close_pos = -1
+
+        while k < n:
+            ch = content[k]
+            if in_string is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = None
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        close_pos = k
+                        break
+                    depth -= 1
+            k += 1
+
+        if close_pos == -1:
+            out.append(content[start])
+            i = start + 1
+            continue
+
+        arg2 = content[arg2_start:close_pos].strip()
+        out.append(f"(({arg2}) __va_arg({arg1}))")
+        replaced += 1
+        i = close_pos + 1
+
+    if replaced == 0:
         logger.warning(
             "No __builtin_va_arg occurrences were rewritten. This may cause issues if the input code uses this builtin."
         )
-    return res
+
+    return "".join(out)
+
+
+def rewrite_unsupported_builtins(content: str) -> str:
+    content = re.sub(r"\b__builtin_unreachable\s*\(\s*\)", "abort()", content)
+    content = rewrite_builtin_va_arg(content)
+    return content
 
 
 def rewrite_cproblem_pycparserext(content: str) -> str:
@@ -378,16 +495,6 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
             i = p
 
     return "".join(out)
-
-
-def rewrite_unsupported_builtins(content: str) -> str:
-    """Rewrite compiler builtins that CPAchecker may not resolve safely.
-
-    `__builtin_unreachable()` has no regular declaration and may trigger
-    null-declaration crashes in downstream tools. Replacing it with `abort()`
-    keeps the control-flow intent explicit and analyzable.
-    """
-    return re.sub(r"\b__builtin_unreachable\s*\(\s*\)", "abort()", content)
 
 
 class ScalarCharInitListTransformer(c_ast.NodeVisitor):
