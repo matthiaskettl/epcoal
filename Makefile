@@ -30,4 +30,4 @@ prepare-benchmarks: prepare-benchexec prepare-bench-defs
 
 analysis:
 	./benchmark/create_table.py --latest
-	./benchmark/analyze_tables.py
+	./benchmark/analyze_tables.py --logfiles benchmark/results/*logfiles*zip
