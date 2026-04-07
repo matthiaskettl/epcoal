@@ -48,7 +48,7 @@ def extract_error_messages_from_log_zip(log_zip: Path) -> list[str]:
             with archive.open(member, "r") as handle:
                 for raw_line in handle:
                     line = raw_line.decode("utf-8", errors="replace").strip()
-                    if line.startswith("Error:"):
+                    if line.lower().startswith("error:"):
                         error_lines.append(line)
     return error_lines
 
