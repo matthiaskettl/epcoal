@@ -192,6 +192,85 @@ def blank_asm_volatile_with_brackets(content: str) -> str:
     return "".join(chars)
 
 
+def blank_gnu_attributes(content: str) -> str:
+    """Blank out `__attribute__((...))` and `__attribute (...)` blocks.
+
+    Some generated kernel translation units contain complex/multiline attributes
+    (e.g., section/alignment markers on `_ddebug` descriptors) that are not
+    handled reliably by the parser. Replacing the attribute text with spaces
+    keeps coordinates stable while removing parse blockers.
+    """
+
+    def _is_ident_char(ch: str) -> bool:
+        return ch.isalnum() or ch == "_"
+
+    chars = list(content)
+    n = len(content)
+    i = 0
+
+    while i < n:
+        if content.startswith("__attribute__", i):
+            token = "__attribute__"
+        elif content.startswith("__attribute", i):
+            token = "__attribute"
+        else:
+            i += 1
+            continue
+
+        # Avoid matching in the middle of longer identifiers.
+        if i > 0 and _is_ident_char(content[i - 1]):
+            i += 1
+            continue
+
+        j = i + len(token)
+        if j < n and _is_ident_char(content[j]):
+            i += 1
+            continue
+
+        while j < n and content[j].isspace():
+            j += 1
+
+        if j >= n or content[j] != "(":
+            i += 1
+            continue
+
+        depth = 1
+        k = j + 1
+        in_string = None
+        escaped = False
+
+        while k < n and depth > 0:
+            ch = content[k]
+            if in_string is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = None
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+            k += 1
+
+        # If malformed, skip and continue scanning.
+        if depth != 0:
+            i += 1
+            continue
+
+        for pos in range(i, k):
+            if chars[pos] != "\n":
+                chars[pos] = " "
+
+        i = k
+
+    return "".join(chars)
+
+
 def ensure_asm_volatile_semicolons(content: str) -> str:
     """Ensure `__asm__ (...)` statements are followed by `;`.
 
@@ -908,6 +987,7 @@ class PrefixTransformer(c_ast.NodeVisitor):
 class Transformer:
     def __init__(self, code, prefix=""):
         code = remove_comments(code)
+        code = blank_gnu_attributes(code)
         code = blank_asm_volatile_with_brackets(code)
         code = rewrite_unsupported_builtins(code)
         code = rewrite_cproblem_pycparserext(code)
