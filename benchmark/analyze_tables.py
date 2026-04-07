@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
+import zipfile
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
@@ -34,6 +36,127 @@ def collect_table_files(pattern: str, repo_root: Path) -> list[Path]:
         return sorted(Path(path) for path in glob.glob(pattern))
 
     return sorted(repo_root.glob(pattern))
+
+
+def extract_error_messages_from_log_zip(log_zip: Path) -> list[str]:
+    """Extract all lines starting with 'Error:' from one .logfiles.zip archive."""
+    error_lines: list[str] = []
+    with zipfile.ZipFile(log_zip) as archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            with archive.open(member, "r") as handle:
+                for raw_line in handle:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line.startswith("Error:"):
+                        error_lines.append(line)
+    return error_lines
+
+
+def collect_errors_per_logfile(log_zips: list[str | Path]) -> dict[str, list[str]]:
+    """Return all Error: lines grouped by logfile zip path.
+
+    Example input filename shape:
+    aor_1000_equivalent_mutants.csv.2026-04-07_17-25-46.logfiles.zip
+    """
+    zip_paths = [Path(path) for path in log_zips]
+    if not zip_paths:
+        return {}
+
+    max_workers = min(len(zip_paths), os.cpu_count() or 1)
+    if max_workers <= 1:
+        return {str(path): extract_error_messages_from_log_zip(path) for path in zip_paths}
+
+    collected: dict[str, list[str]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(extract_error_messages_from_log_zip, path): path for path in zip_paths}
+        for future in as_completed(futures):
+            path = futures[future]
+            collected[str(path)] = future.result()
+    return collected
+
+
+def build_logfile_stats(errors_per_logfile: dict[str, list[str]]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for logfile, messages in sorted(errors_per_logfile.items()):
+        unique_messages = set(messages)
+        top_error = ""
+        top_count = 0
+        if messages:
+            counts: dict[str, int] = {}
+            for msg in messages:
+                counts[msg] = counts.get(msg, 0) + 1
+            top_error, top_count = max(counts.items(), key=lambda item: item[1])
+
+        rows.append(
+            {
+                "logfile": logfile,
+                "error_count": len(messages),
+                "unique_error_count": len(unique_messages),
+                "has_errors": bool(messages),
+                "top_error_count": top_count,
+                "top_error": top_error,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def print_logfile_stats(logfile_stats: pd.DataFrame) -> None:
+    print("\\nLogfile Error Stats")
+    print("=" * 80)
+    if logfile_stats.empty:
+        print("No logfile stats available")
+        return
+
+    name_width = min(60, max(len("logfile"), int(logfile_stats["logfile"].map(len).max())))
+    header = f"{'logfile':<{name_width}}  {'errors':>8}  {'unique':>8}"
+    print(header)
+    print("-" * len(header))
+
+    for _, row in logfile_stats.iterrows():
+        logfile = str(row["logfile"])
+        if len(logfile) > name_width:
+            logfile = "..." + logfile[-(name_width - 3):]
+        print(f"{logfile:<{name_width}}  {int(row['error_count']):>8}  {int(row['unique_error_count']):>8}")
+
+    total_files = int(logfile_stats.shape[0])
+    files_with_errors = int(logfile_stats["has_errors"].sum())
+    total_errors = int(logfile_stats["error_count"].sum())
+    total_unique = int(logfile_stats["unique_error_count"].sum())
+    print("-" * len(header))
+    print(
+        f"files={total_files}, files_with_errors={files_with_errors}, total_errors={total_errors}, total_unique_errors={total_unique}"
+    )
+
+
+def write_logfile_stats_text(logfile_stats: pd.DataFrame, output_file: Path) -> None:
+    lines: list[str] = ["Logfile Error Stats", "=" * 80]
+    if logfile_stats.empty:
+        lines.append("No logfile stats available")
+        output_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+
+    name_width = min(60, max(len("logfile"), int(logfile_stats["logfile"].map(len).max())))
+    header = f"{'logfile':<{name_width}}  {'errors':>8}  {'unique':>8}"
+    lines.append(header)
+    lines.append("-" * len(header))
+    for _, row in logfile_stats.iterrows():
+        logfile = str(row["logfile"])
+        if len(logfile) > name_width:
+            logfile = "..." + logfile[-(name_width - 3):]
+        lines.append(f"{logfile:<{name_width}}  {int(row['error_count']):>8}  {int(row['unique_error_count']):>8}")
+
+    total_files = int(logfile_stats.shape[0])
+    files_with_errors = int(logfile_stats["has_errors"].sum())
+    total_errors = int(logfile_stats["error_count"].sum())
+    total_unique = int(logfile_stats["unique_error_count"].sum())
+    lines.append("-" * len(header))
+    lines.append(
+        f"files={total_files}, files_with_errors={files_with_errors}, total_errors={total_errors}, total_unique_errors={total_unique}"
+    )
+
+    output_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def parse_table_name(path: Path) -> tuple[str, str]:
@@ -233,6 +356,12 @@ def main() -> int:
         default="benchmark/analysis",
         help="Directory for plots and summary files (default: %(default)s)",
     )
+    parser.add_argument(
+        "--logfiles",
+        nargs="+",
+        required=True,
+        help="List of *.logfiles.zip files to scan for lines starting with 'Error:'",
+    )
 
     args = parser.parse_args()
 
@@ -244,6 +373,26 @@ def main() -> int:
 
     output_dir = repo_root / args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_zip_paths = [Path(path) for path in args.logfiles]
+    errors_per_logfile = collect_errors_per_logfile(log_zip_paths)
+    logfile_stats = build_logfile_stats(errors_per_logfile)
+
+    error_rows: list[dict[str, str]] = []
+    for logfile, messages in sorted(errors_per_logfile.items()):
+        if not messages:
+            error_rows.append({"logfile": logfile, "error": ""})
+            continue
+        for message in messages:
+            error_rows.append({"logfile": logfile, "error": message})
+
+    pd.DataFrame(error_rows).to_csv(output_dir / "log_errors.csv", index=False)
+    logfile_stats.to_csv(output_dir / "logfile_stats.csv", index=False)
+    write_logfile_stats_text(logfile_stats, output_dir / "logfile_stats.txt")
+    with (output_dir / "log_errors.json").open("w", encoding="utf-8") as handle:
+        json.dump(errors_per_logfile, handle, indent=2)
+
+    print_logfile_stats(logfile_stats)
 
     frame = load_all_tables(table_files)
     status_counts = build_status_counts(frame)
@@ -279,6 +428,10 @@ def main() -> int:
     input_files.to_csv(output_dir / "input_files.csv", index=False)
 
     print(f"Wrote analysis outputs to {output_dir}")
+    print(f"  Log errors CSV: {output_dir / 'log_errors.csv'}")
+    print(f"  Log errors JSON: {output_dir / 'log_errors.json'}")
+    print(f"  Logfile stats CSV: {output_dir / 'logfile_stats.csv'}")
+    print(f"  Logfile stats TXT: {output_dir / 'logfile_stats.txt'}")
     print(f"  Overall: {output_dir / 'overall'}")
     print(f"  Per prefix+kind: {output_dir / 'by_prefix_kind'}")
     print(f"  Per prefix combined: {output_dir / 'by_prefix'}")
