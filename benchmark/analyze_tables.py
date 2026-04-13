@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import difflib
 import json
 import os
 import re
@@ -29,6 +30,8 @@ SUCCESS_STATUSES = [
 ]
 
 TABLE_NAME_RX = re.compile(r"^(?P<prefix>.+?)_(?P<kind>non_)?equivalent\.table\.csv$")
+RUN_ID_RX = re.compile(r"^m(?P<index>\d+)$")
+MUTATION_OPERATOR_RX = re.compile(r"\.mutant\.(?P<operator>cor_[^.]+)\.\d+\.[^.]+$")
 
 
 def collect_table_files(pattern: str, repo_root: Path) -> list[Path]:
@@ -193,12 +196,25 @@ def load_table_csv(path: Path) -> pd.DataFrame:
 
     frame = frame.rename(columns=rename_map)
 
+    run_id_column = infer_run_id_column(frame)
+
     required = {"status", "cputime_s", "walltime_s", "memory_mb"}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"{path} is missing expected columns: {sorted(missing)}")
 
-    frame = frame[["task", "status", "cputime_s", "walltime_s", "memory_mb"]].copy()
+    selected_columns = ["task", "status", "cputime_s", "walltime_s", "memory_mb"]
+    if run_id_column:
+        selected_columns.insert(1, run_id_column)
+
+    frame = frame[selected_columns].copy()
+    if run_id_column:
+        frame = frame.rename(columns={run_id_column: "run_id"})
+    else:
+        frame["run_id"] = ""
+
+    frame["run_index"] = frame["run_id"].astype(str).str.extract(RUN_ID_RX, expand=False)
+    frame["run_index"] = pd.to_numeric(frame["run_index"], errors="coerce")
     frame["source_file"] = path.name
     frame["prefix"] = prefix
     frame["equiv_kind"] = kind
@@ -214,6 +230,295 @@ def load_table_csv(path: Path) -> pd.DataFrame:
         ordered=True,
     )
     return frame
+
+
+def infer_run_id_column(frame: pd.DataFrame) -> str | None:
+    for column in frame.columns:
+        lowered = str(column).strip().lower()
+        if lowered in {"status", "cputime_s", "walltime_s", "memory_mb", "task", "host"}:
+            continue
+        values = frame[column].astype(str).str.strip()
+        if values.empty:
+            continue
+        matches = values.str.fullmatch(RUN_ID_RX)
+        if matches.mean() >= 0.8:
+            return column
+    return None
+
+
+def status_to_predicted_label(status: str) -> str:
+    normalized = str(status).strip().lower()
+    if "done (not equivalent)" in normalized:
+        return "not_equivalent"
+    if "done (equivalent)" in normalized or "done (equivalent?)" in normalized:
+        return "equivalent"
+    return "unknown"
+
+
+def extract_mutation_operator(mutant_path: str) -> str:
+    match = MUTATION_OPERATOR_RX.search(mutant_path)
+    if not match:
+        return "unknown"
+    return match.group("operator")
+
+
+def build_diff_features(original_file: Path, mutant_file: Path, mutant_path: str) -> dict[str, object]:
+    try:
+        original_lines = original_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        mutant_lines = mutant_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {
+            "operator": extract_mutation_operator(mutant_path),
+            "pattern_signature": "file_missing",
+            "hunk_count": 0,
+            "added_lines": 0,
+            "removed_lines": 0,
+            "changed_line_count": 0,
+            "contains_or": False,
+            "contains_and": False,
+            "contains_not": False,
+            "contains_true_false": False,
+            "contains_comparison": False,
+            "contains_arithmetic": False,
+            "diff_excerpt": "",
+        }
+
+    diff_lines = list(
+        difflib.unified_diff(
+            original_lines,
+            mutant_lines,
+            fromfile=str(original_file),
+            tofile=str(mutant_file),
+            lineterm="",
+        )
+    )
+
+    added: list[str] = []
+    removed: list[str] = []
+    hunks = 0
+    excerpts: list[str] = []
+    for line in diff_lines:
+        if line.startswith("@@"):
+            hunks += 1
+            continue
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            content = line[1:]
+            added.append(content)
+            if len(excerpts) < 6:
+                excerpts.append(f"+ {content}")
+        elif line.startswith("-"):
+            content = line[1:]
+            removed.append(content)
+            if len(excerpts) < 6:
+                excerpts.append(f"- {content}")
+
+    changed_text = "\n".join(added + removed)
+    contains_or = "||" in changed_text
+    contains_and = "&&" in changed_text
+    contains_not = bool(re.search(r"(?<![=!<>])!(?!=)", changed_text))
+    contains_true_false = bool(re.search(r"\b(true|false)\b", changed_text))
+    contains_comparison = bool(re.search(r"==|!=|<=|>=|<|>", changed_text))
+    contains_arithmetic = bool(re.search(r"[+\-*/%]", changed_text))
+
+    operator = extract_mutation_operator(mutant_path)
+    tags = [operator]
+    if contains_or:
+        tags.append("logic_or")
+    if contains_and:
+        tags.append("logic_and")
+    if contains_not:
+        tags.append("logic_not")
+    if contains_true_false:
+        tags.append("bool_literal")
+    if contains_comparison:
+        tags.append("comparison")
+    if contains_arithmetic:
+        tags.append("arithmetic")
+    if len(tags) == 1:
+        tags.append("other")
+
+    return {
+        "operator": operator,
+        "pattern_signature": "|".join(tags),
+        "hunk_count": hunks,
+        "added_lines": len(added),
+        "removed_lines": len(removed),
+        "changed_line_count": len(added) + len(removed),
+        "contains_or": contains_or,
+        "contains_and": contains_and,
+        "contains_not": contains_not,
+        "contains_true_false": contains_true_false,
+        "contains_comparison": contains_comparison,
+        "contains_arithmetic": contains_arithmetic,
+        "diff_excerpt": "\\n".join(excerpts),
+    }
+
+
+def resolve_existing_path(repo_root: Path, relative_path: str) -> Path:
+    rel = Path(relative_path)
+    candidates = [
+        repo_root / "benchmark" / rel,
+        repo_root / "benchmark" / "sv-benchmarks" / rel,
+        repo_root / rel,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path) -> None:
+    cases = [
+        {
+            "name": "1000_equivalent_mutants",
+            "mapping_csv": repo_root / "benchmark" / "cor_1000_equivalent_mutants.csv",
+            "table_csv": repo_root / "benchmark" / "cor_equivalent.table.csv",
+            "focus_predicted_label": "not_equivalent",
+            "description": "Equivalent mutants classified as not equivalent",
+        },
+        {
+            "name": "1000_non_equivalent_mutants",
+            "mapping_csv": repo_root / "benchmark" / "cor_1000_non_equivalent_mutants.csv",
+            "table_csv": repo_root / "benchmark" / "cor_non_equivalent.table.csv",
+            "focus_predicted_label": "equivalent",
+            "description": "Non-equivalent mutants classified as equivalent",
+        },
+    ]
+
+    qualitative_root = output_dir / "qualitative"
+    qualitative_root.mkdir(parents=True, exist_ok=True)
+    index_rows: list[dict[str, object]] = []
+
+    for case in cases:
+        mapping_csv = case["mapping_csv"]
+        table_csv = case["table_csv"]
+        if not mapping_csv.exists() or not table_csv.exists():
+            continue
+
+        mapping = pd.read_csv(mapping_csv, dtype=str).fillna("")
+        if "original_path" not in mapping.columns or "mutant_path" not in mapping.columns:
+            continue
+
+        table_frame = load_table_csv(table_csv)
+        table_frame = table_frame.copy()
+        table_frame["predicted_label"] = table_frame["status"].map(status_to_predicted_label)
+
+        if table_frame["run_index"].notna().any():
+            table_subset = table_frame[["run_index", "status", "predicted_label"]].dropna(subset=["run_index"])
+            table_subset["run_index"] = table_subset["run_index"].astype(int)
+            mapping = mapping.reset_index(drop=True)
+            mapping["run_index"] = mapping.index + 1
+            joined = mapping.merge(table_subset, on="run_index", how="left")
+        else:
+            statuses = table_frame[["status", "predicted_label"]].reset_index(drop=True)
+            joined = mapping.reset_index(drop=True).join(statuses)
+
+        joined["predicted_label"] = joined["predicted_label"].fillna("unknown")
+        joined["status"] = joined["status"].fillna("(missing)")
+
+        focus_predicted_label = str(case["focus_predicted_label"])
+        focus = joined[joined["predicted_label"] == focus_predicted_label].copy()
+
+        feature_rows: list[dict[str, object]] = []
+        for _, row in focus.iterrows():
+            original_path = str(row["original_path"]).strip()
+            mutant_path = str(row["mutant_path"]).strip()
+            original_file = resolve_existing_path(repo_root, original_path)
+            mutant_file = resolve_existing_path(repo_root, mutant_path)
+            features = build_diff_features(original_file, mutant_file, mutant_path)
+
+            feature_rows.append(
+                {
+                    "original_path": original_path,
+                    "mutant_path": mutant_path,
+                    "status": str(row["status"]),
+                    "predicted_label": str(row["predicted_label"]),
+                    **features,
+                }
+            )
+
+        case_output_dir = qualitative_root / str(case["name"])
+        case_output_dir.mkdir(parents=True, exist_ok=True)
+
+        feature_frame = pd.DataFrame(feature_rows)
+        if feature_frame.empty:
+            feature_frame = pd.DataFrame(
+                columns=[
+                    "original_path",
+                    "mutant_path",
+                    "status",
+                    "predicted_label",
+                    "operator",
+                    "pattern_signature",
+                    "hunk_count",
+                    "added_lines",
+                    "removed_lines",
+                    "changed_line_count",
+                    "contains_or",
+                    "contains_and",
+                    "contains_not",
+                    "contains_true_false",
+                    "contains_comparison",
+                    "contains_arithmetic",
+                    "diff_excerpt",
+                ]
+            )
+
+        pattern_counts = (
+            feature_frame["pattern_signature"].value_counts(dropna=False).rename_axis("pattern_signature").reset_index(name="count")
+            if not feature_frame.empty
+            else pd.DataFrame(columns=["pattern_signature", "count"])
+        )
+
+        operator_counts = (
+            feature_frame["operator"].value_counts(dropna=False).rename_axis("operator").reset_index(name="count")
+            if not feature_frame.empty
+            else pd.DataFrame(columns=["operator", "count"])
+        )
+
+        feature_frame.to_csv(case_output_dir / "misclassified_cases.csv", index=False)
+        pattern_counts.to_csv(case_output_dir / "pattern_counts.csv", index=False)
+        operator_counts.to_csv(case_output_dir / "operator_counts.csv", index=False)
+
+        summary_lines = [
+            f"Case: {case['name']}",
+            f"Description: {case['description']}",
+            f"Total benchmark entries: {len(joined)}",
+            f"Misclassified entries in scope: {len(feature_frame)}",
+            f"Focus predicted label: {focus_predicted_label}",
+            "",
+            "Top pattern signatures:",
+        ]
+        if pattern_counts.empty:
+            summary_lines.append("  (none)")
+        else:
+            for _, pattern_row in pattern_counts.head(15).iterrows():
+                summary_lines.append(f"  {pattern_row['pattern_signature']}: {int(pattern_row['count'])}")
+
+        summary_lines.append("")
+        summary_lines.append("Top operators:")
+        if operator_counts.empty:
+            summary_lines.append("  (none)")
+        else:
+            for _, operator_row in operator_counts.head(15).iterrows():
+                summary_lines.append(f"  {operator_row['operator']}: {int(operator_row['count'])}")
+
+        (case_output_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+        index_rows.append(
+            {
+                "case": case["name"],
+                "description": case["description"],
+                "total_entries": len(joined),
+                "misclassified_entries": len(feature_frame),
+                "focus_predicted_label": focus_predicted_label,
+            }
+        )
+
+    if index_rows:
+        pd.DataFrame(index_rows).to_csv(qualitative_root / "index.csv", index=False)
 
 
 def load_all_tables(table_files: list[Path]) -> pd.DataFrame:
@@ -359,7 +664,7 @@ def main() -> int:
     parser.add_argument(
         "--logfiles",
         nargs="+",
-        required=True,
+        default=[],
         help="List of *.logfiles.zip files to scan for lines starting with 'Error:'",
     )
 
@@ -427,6 +732,8 @@ def main() -> int:
     input_files = input_files.sort_values(["prefix", "equiv_kind", "source_file"])
     input_files.to_csv(output_dir / "input_files.csv", index=False)
 
+    run_qualitative_misclassification_analysis(repo_root, output_dir)
+
     print(f"Wrote analysis outputs to {output_dir}")
     print(f"  Log errors CSV: {output_dir / 'log_errors.csv'}")
     print(f"  Log errors JSON: {output_dir / 'log_errors.json'}")
@@ -435,6 +742,7 @@ def main() -> int:
     print(f"  Overall: {output_dir / 'overall'}")
     print(f"  Per prefix+kind: {output_dir / 'by_prefix_kind'}")
     print(f"  Per prefix combined: {output_dir / 'by_prefix'}")
+    print(f"  Qualitative misclassification: {output_dir / 'qualitative'}")
     return 0
 
 
