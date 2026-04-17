@@ -15,7 +15,17 @@ lib/cpachecker:
 	mv lib/CPAchecker-* lib/cpachecker
 	rm lib/cpachecker.zip
 
-setup: lib/pip lib/cpachecker
+lib/uautomizer:
+	rm -rf lib/UAutomizer-linux
+	cd lib && curl -s 'https://gitlab.com/sosy-lab/benchmarking/fm-tools/-/raw/main/data/uautomizer.yml' \
+	  | yq -r '.versions[0].doi | capture("zenodo\\.(?<id>[0-9]+)") | .id' \
+	  | xargs -I{} curl -s "https://zenodo.org/api/records/{}" \
+	  | jq -r '.files[0].links.self' \
+	  | xargs -I{} curl -L -o uautomizer.zip {}
+	cd lib && unzip uautomizer.zip
+	rm lib/uautomizer.zip
+
+setup: lib/pip lib/cpachecker lib/uautomizer
 
 prepare-benchexec:
 	rm -rf benchmark/benchexec

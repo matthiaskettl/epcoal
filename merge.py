@@ -185,6 +185,20 @@ class AssertionBuilder:
 
     def _build_pointer_assert(self, lhs, rhs, ptr_kind):
         """Build pointer comparison according to configured policy."""
+        if ptr_kind == "charptr":
+            return (
+                f"if(({lhs}) == 0 || ({rhs}) == 0) {{ "
+                f"if(({lhs}) != ({rhs})) {{ reach_error(); }} "
+                f"}} else if(strcmp((const char *)({lhs}), (const char *)({rhs})) != 0) {{ reach_error(); }}"
+            )
+
+        if ptr_kind == "primptr":
+            return (
+                f"if(({lhs}) == 0 || ({rhs}) == 0) {{ "
+                f"if(({lhs}) != ({rhs})) {{ reach_error(); }} "
+                f"}} else if(*({lhs}) != *({rhs})) {{ reach_error(); }}"
+            )
+
         policy = self.pointer_policy
         if policy == "nullness":
             return f"if((({lhs}) == 0) != (({rhs}) == 0)) {{ reach_error(); }}"
@@ -416,6 +430,10 @@ class AssertionBuilder:
             target = type_obj.type
             if isinstance(target, c_ast.FuncDecl):
                 return "funcptr"
+            if self._resolves_to_char_type(target, seen_typedefs.copy()):
+                return "charptr"
+            if self._resolves_to_primitive_scalar_type(target, seen_typedefs.copy()):
+                return "primptr"
             if isinstance(target, c_ast.TypeDecl) and isinstance(target.type, c_ast.IdentifierType):
                 names = target.type.names
                 if len(names) == 1:
@@ -451,6 +469,74 @@ class AssertionBuilder:
                 return self._resolve_pointer_kind(target, seen_typedefs)
 
         return None
+
+    def _resolves_to_char_type(self, type_obj, seen_typedefs=None):
+        """Return True if type resolves to plain/signed/unsigned char."""
+        if seen_typedefs is None:
+            seen_typedefs = set()
+
+        if isinstance(type_obj, c_ast.TypeDecl):
+            return self._resolves_to_char_type(type_obj.type, seen_typedefs)
+
+        if isinstance(type_obj, c_ast.IdentifierType):
+            names = type_obj.names
+            if names in (["char"], ["signed", "char"], ["unsigned", "char"]):
+                return True
+
+            if len(names) == 1:
+                alias = names[0]
+                if alias in seen_typedefs:
+                    return False
+                target = self.typedef_defs.get(alias)
+                if target is None:
+                    return False
+                seen_typedefs.add(alias)
+                return self._resolves_to_char_type(target, seen_typedefs)
+
+        return False
+
+    def _resolves_to_primitive_scalar_type(self, type_obj, seen_typedefs=None):
+        """Return True if type resolves to a primitive scalar (non-pointer) type."""
+        if seen_typedefs is None:
+            seen_typedefs = set()
+
+        if isinstance(type_obj, c_ast.TypeDecl):
+            return self._resolves_to_primitive_scalar_type(type_obj.type, seen_typedefs)
+
+        if isinstance(type_obj, c_ast.Enum):
+            return True
+
+        if isinstance(type_obj, c_ast.IdentifierType):
+            names = type_obj.names
+
+            if len(names) == 1:
+                alias = names[0]
+                target = self.typedef_defs.get(alias)
+                if target is not None:
+                    if alias in seen_typedefs:
+                        return False
+                    seen_typedefs.add(alias)
+                    return self._resolves_to_primitive_scalar_type(target, seen_typedefs)
+
+            # Built-in scalar types; reject `void` and storage/type tags.
+            if "void" in names or "struct" in names or "union" in names:
+                return False
+
+            primitive_tokens = {
+                "char",
+                "short",
+                "int",
+                "long",
+                "signed",
+                "unsigned",
+                "float",
+                "double",
+                "_Bool",
+                "bool",
+            }
+            return any(token in primitive_tokens for token in names)
+
+        return False
 
     def _get_array_dim_code(self, dim):
         """Extract array dimension as C code."""
@@ -959,6 +1045,7 @@ class Merger:
 
         # Some fallback equality checks use memcmp; ensure a declaration exists.
         self._add_memcmp_decl_if_needed(merged_ext, check_code)
+        self._add_strcmp_decl_if_needed(merged_ext, check_code)
 
         # Create external declarations for pure functions from both global nondet vars and function body calls
         self._add_pure_function_declarations_all(merged_ext, nondet_pairs, replacer.nondet_calls_found)
@@ -1388,6 +1475,21 @@ class Merger:
         parsed = parser.parse(decl_code)
         ext_list.insert(0, parsed.ext[0])
         logger.info("Added external declaration for memcmp")
+
+    def _add_strcmp_decl_if_needed(self, ext_list, checks):
+        """Add `extern int strcmp(...)` when strcmp is referenced by generated checks."""
+        if not any("strcmp(" in stmt for stmt in checks):
+            return
+
+        for ext in ext_list:
+            if isinstance(ext, c_ast.Decl) and _is_func_decl_type(ext.type) and ext.name == "strcmp":
+                return
+
+        parser = GnuCParser()
+        decl_code = "extern int strcmp(const char *lhs, const char *rhs);"
+        parsed = parser.parse(decl_code)
+        ext_list.insert(0, parsed.ext[0])
+        logger.info("Added external declaration for strcmp")
 
     def _add_global_compare_helper(self, ext_list, checks):
         """Add a single helper that compares all matched globals."""
