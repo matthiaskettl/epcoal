@@ -15,22 +15,20 @@ lib/cpachecker:
 	mv lib/CPAchecker-* lib/cpachecker
 	rm lib/cpachecker.zip
 
-lib/uautomizer:
-	rm -rf lib/UAutomizer-linux
-	cd lib && curl -s 'https://gitlab.com/sosy-lab/benchmarking/fm-tools/-/raw/main/data/uautomizer.yml' \
-	  | yq -r '.versions[0].doi | capture("zenodo\\.(?<id>[0-9]+)") | .id' \
-	  | xargs -I{} curl -s "https://zenodo.org/api/records/{}" \
-	  | jq -r '.files[0].links.self' \
-	  | xargs -I{} curl -L -o uautomizer.zip {}
-	cd lib && unzip uautomizer.zip
-	rm lib/uautomizer.zip
+setup: lib/pip lib/cpachecker
 
-setup: lib/pip lib/cpachecker lib/uautomizer
+run-example:
+	echo "Running TCE:"
+	./tce.sh gcc -Os examples/paper-example.c examples/paper-example_mutant.c
+	sleep 3
+	echo "Running Treq:"
+	./check.py examples/paper-example.c --mutant examples/paper-example_mutant.c
 
 prepare-benchexec:
 	rm -rf benchmark/benchexec
 	git -C benchmark clone https://github.com/sosy-lab/benchexec
-	cp benchmark/epcoal.py benchmark/benchexec/benchexec/tools/epcoal.py
+	cp benchmark/treq.py benchmark/benchexec/benchexec/tools/treq.py
+	cp benchmark/tce.py benchmark/benchexec/benchexec/tools/tce.py
 
 prepare-bench-defs:
 	@if [ ! -d benchmark/sv-benchmarks ]; then echo "Error: benchmark/sv-benchmarks not found"; exit 1; fi

@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.append(str((Path(__file__).absolute().parent / "lib" / "pip")))
+from termcolor import colored
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +296,7 @@ def main():
         signal.signal(signal.SIGTERM, prev_sigterm)
         total_elapsed = time.perf_counter() - total_start
         print(timing_stats.render(total_elapsed))
-        print(f"Final verdict: {verdict}")
+        print(colored(f"Final verdict: {verdict}", "red"))
 
 
 if __name__ == "__main__":
