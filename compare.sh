@@ -2,6 +2,9 @@
 
 set -e
 
+# Get directory where THIS script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PROG1="$1"
 PROG2="$2"
 COMPILER="$3"
@@ -16,7 +19,7 @@ fi
 # ----------------------------
 # 1. Run Python checker
 # ----------------------------
-PY_OUTPUT=$(./check.py "$PROG1" --mutant "$PROG2")
+PY_OUTPUT=$(python3 "$SCRIPT_DIR/check.py" "$PROG1" --mutant "$PROG2")
 
 echo "=== Python output ==="
 echo "$PY_OUTPUT"
@@ -32,8 +35,7 @@ fi
 # ----------------------------
 # 2. Run TCE script
 # ----------------------------
-# Pass compiler + optimization as separate args
-TCE_OUTPUT=$(./tce.sh "$COMPILER" "$OPT" "$PROG1" "$PROG2")
+TCE_OUTPUT=$("$SCRIPT_DIR/tce.sh" "$COMPILER" "$OPT" "$PROG1" "$PROG2")
 
 echo "=== TCE output ==="
 echo "$TCE_OUTPUT"
