@@ -129,18 +129,34 @@ def main():
     )
     parser.add_argument(
         "--cpachecker",
-        default=str((Path(__file__).resolve().parent / "lib" / "cpachecker" / "bin" / "cpachecker").resolve()),
+        default=str(
+            (
+                Path(__file__).resolve().parent
+                / "lib"
+                / "cpachecker"
+                / "bin"
+                / "cpachecker"
+            ).resolve()
+        ),
         help="Path to CPAchecker executable",
     )
-    parser.add_argument("--output-dir", default="output", help="Directory for generated files")
+    parser.add_argument(
+        "--output-dir", default="output", help="Directory for generated files"
+    )
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default="INFO",
         help="Logging verbosity",
     )
-    parser.add_argument("--original-prefix", default="original_", help="Prefix for original transformation")
-    parser.add_argument("--mutant-prefix", default="mutant_", help="Prefix for mutant transformation")
+    parser.add_argument(
+        "--original-prefix",
+        default="original_",
+        help="Prefix for original transformation",
+    )
+    parser.add_argument(
+        "--mutant-prefix", default="mutant_", help="Prefix for mutant transformation"
+    )
     parser.add_argument(
         "--benchmark",
         action="store_true",
@@ -243,7 +259,9 @@ def main():
                 pointer_policy=args.pointer_policy,
                 compare_modified_only=args.compare_modified_only,
             )
-            merged_ast, _ = run_timed_python_step("merge", merger.merge, stats=timing_stats)
+            merged_ast, _ = run_timed_python_step(
+                "merge", merger.merge, stats=timing_stats
+            )
             merged_code = merger.generate_code(merged_ast)
             merged_out.write_text(merged_code)
         except Exception as e:
@@ -263,7 +281,9 @@ def main():
             ]
         )
 
-        result, _ = run_timed_step("cpachecker", cpachecker_cmd, cwd=workdir, stats=timing_stats)
+        result, _ = run_timed_step(
+            "cpachecker", cpachecker_cmd, cwd=workdir, stats=timing_stats
+        )
 
         combined_output = (result.stdout or "") + "\n" + (result.stderr or "")
         verdict = classify_cpachecker_output(combined_output)

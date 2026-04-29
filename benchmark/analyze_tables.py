@@ -68,11 +68,16 @@ def collect_errors_per_logfile(log_zips: list[str | Path]) -> dict[str, list[str
 
     max_workers = min(len(zip_paths), os.cpu_count() or 1)
     if max_workers <= 1:
-        return {str(path): extract_error_messages_from_log_zip(path) for path in zip_paths}
+        return {
+            str(path): extract_error_messages_from_log_zip(path) for path in zip_paths
+        }
 
     collected: dict[str, list[str]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(extract_error_messages_from_log_zip, path): path for path in zip_paths}
+        futures = {
+            executor.submit(extract_error_messages_from_log_zip, path): path
+            for path in zip_paths
+        }
         for future in as_completed(futures):
             path = futures[future]
             collected[str(path)] = future.result()
@@ -112,7 +117,9 @@ def print_logfile_stats(logfile_stats: pd.DataFrame) -> None:
         print("No logfile stats available")
         return
 
-    name_width = min(60, max(len("logfile"), int(logfile_stats["logfile"].map(len).max())))
+    name_width = min(
+        60, max(len("logfile"), int(logfile_stats["logfile"].map(len).max()))
+    )
     header = f"{'logfile':<{name_width}}  {'errors':>8}  {'unique':>8}"
     print(header)
     print("-" * len(header))
@@ -120,8 +127,10 @@ def print_logfile_stats(logfile_stats: pd.DataFrame) -> None:
     for _, row in logfile_stats.iterrows():
         logfile = str(row["logfile"])
         if len(logfile) > name_width:
-            logfile = "..." + logfile[-(name_width - 3):]
-        print(f"{logfile:<{name_width}}  {int(row['error_count']):>8}  {int(row['unique_error_count']):>8}")
+            logfile = "..." + logfile[-(name_width - 3) :]
+        print(
+            f"{logfile:<{name_width}}  {int(row['error_count']):>8}  {int(row['unique_error_count']):>8}"
+        )
 
     total_files = int(logfile_stats.shape[0])
     files_with_errors = int(logfile_stats["has_errors"].sum())
@@ -140,15 +149,19 @@ def write_logfile_stats_text(logfile_stats: pd.DataFrame, output_file: Path) -> 
         output_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
 
-    name_width = min(60, max(len("logfile"), int(logfile_stats["logfile"].map(len).max())))
+    name_width = min(
+        60, max(len("logfile"), int(logfile_stats["logfile"].map(len).max()))
+    )
     header = f"{'logfile':<{name_width}}  {'errors':>8}  {'unique':>8}"
     lines.append(header)
     lines.append("-" * len(header))
     for _, row in logfile_stats.iterrows():
         logfile = str(row["logfile"])
         if len(logfile) > name_width:
-            logfile = "..." + logfile[-(name_width - 3):]
-        lines.append(f"{logfile:<{name_width}}  {int(row['error_count']):>8}  {int(row['unique_error_count']):>8}")
+            logfile = "..." + logfile[-(name_width - 3) :]
+        lines.append(
+            f"{logfile:<{name_width}}  {int(row['error_count']):>8}  {int(row['unique_error_count']):>8}"
+        )
 
     total_files = int(logfile_stats.shape[0])
     files_with_errors = int(logfile_stats["has_errors"].sum())
@@ -213,7 +226,9 @@ def load_table_csv(path: Path) -> pd.DataFrame:
     else:
         frame["run_id"] = ""
 
-    frame["run_index"] = frame["run_id"].astype(str).str.extract(RUN_ID_RX, expand=False)
+    frame["run_index"] = (
+        frame["run_id"].astype(str).str.extract(RUN_ID_RX, expand=False)
+    )
     frame["run_index"] = pd.to_numeric(frame["run_index"], errors="coerce")
     frame["source_file"] = path.name
     frame["prefix"] = prefix
@@ -235,7 +250,14 @@ def load_table_csv(path: Path) -> pd.DataFrame:
 def infer_run_id_column(frame: pd.DataFrame) -> str | None:
     for column in frame.columns:
         lowered = str(column).strip().lower()
-        if lowered in {"status", "cputime_s", "walltime_s", "memory_mb", "task", "host"}:
+        if lowered in {
+            "status",
+            "cputime_s",
+            "walltime_s",
+            "memory_mb",
+            "task",
+            "host",
+        }:
             continue
         values = frame[column].astype(str).str.strip()
         if values.empty:
@@ -262,10 +284,16 @@ def extract_mutation_operator(mutant_path: str) -> str:
     return match.group("operator")
 
 
-def build_diff_features(original_file: Path, mutant_file: Path, mutant_path: str) -> dict[str, object]:
+def build_diff_features(
+    original_file: Path, mutant_file: Path, mutant_path: str
+) -> dict[str, object]:
     try:
-        original_lines = original_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        mutant_lines = mutant_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        original_lines = original_file.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+        mutant_lines = mutant_file.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
     except OSError:
         return {
             "operator": extract_mutation_operator(mutant_path),
@@ -369,7 +397,9 @@ def resolve_existing_path(repo_root: Path, relative_path: str) -> Path:
     return candidates[0]
 
 
-def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path) -> None:
+def run_qualitative_misclassification_analysis(
+    repo_root: Path, output_dir: Path
+) -> None:
     cases = [
         {
             "name": "1000_equivalent_mutants",
@@ -380,7 +410,9 @@ def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path
         },
         {
             "name": "1000_non_equivalent_mutants",
-            "mapping_csv": repo_root / "benchmark" / "cor_1000_non_equivalent_mutants.csv",
+            "mapping_csv": repo_root
+            / "benchmark"
+            / "cor_1000_non_equivalent_mutants.csv",
             "table_csv": repo_root / "benchmark" / "cor_non_equivalent.table.csv",
             "focus_predicted_label": "equivalent",
             "description": "Non-equivalent mutants classified as equivalent",
@@ -398,15 +430,22 @@ def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path
             continue
 
         mapping = pd.read_csv(mapping_csv, dtype=str).fillna("")
-        if "original_path" not in mapping.columns or "mutant_path" not in mapping.columns:
+        if (
+            "original_path" not in mapping.columns
+            or "mutant_path" not in mapping.columns
+        ):
             continue
 
         table_frame = load_table_csv(table_csv)
         table_frame = table_frame.copy()
-        table_frame["predicted_label"] = table_frame["status"].map(status_to_predicted_label)
+        table_frame["predicted_label"] = table_frame["status"].map(
+            status_to_predicted_label
+        )
 
         if table_frame["run_index"].notna().any():
-            table_subset = table_frame[["run_index", "status", "predicted_label"]].dropna(subset=["run_index"])
+            table_subset = table_frame[
+                ["run_index", "status", "predicted_label"]
+            ].dropna(subset=["run_index"])
             table_subset["run_index"] = table_subset["run_index"].astype(int)
             mapping = mapping.reset_index(drop=True)
             mapping["run_index"] = mapping.index + 1
@@ -467,13 +506,19 @@ def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path
             )
 
         pattern_counts = (
-            feature_frame["pattern_signature"].value_counts(dropna=False).rename_axis("pattern_signature").reset_index(name="count")
+            feature_frame["pattern_signature"]
+            .value_counts(dropna=False)
+            .rename_axis("pattern_signature")
+            .reset_index(name="count")
             if not feature_frame.empty
             else pd.DataFrame(columns=["pattern_signature", "count"])
         )
 
         operator_counts = (
-            feature_frame["operator"].value_counts(dropna=False).rename_axis("operator").reset_index(name="count")
+            feature_frame["operator"]
+            .value_counts(dropna=False)
+            .rename_axis("operator")
+            .reset_index(name="count")
             if not feature_frame.empty
             else pd.DataFrame(columns=["operator", "count"])
         )
@@ -495,7 +540,9 @@ def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path
             summary_lines.append("  (none)")
         else:
             for _, pattern_row in pattern_counts.head(15).iterrows():
-                summary_lines.append(f"  {pattern_row['pattern_signature']}: {int(pattern_row['count'])}")
+                summary_lines.append(
+                    f"  {pattern_row['pattern_signature']}: {int(pattern_row['count'])}"
+                )
 
         summary_lines.append("")
         summary_lines.append("Top operators:")
@@ -503,9 +550,13 @@ def run_qualitative_misclassification_analysis(repo_root: Path, output_dir: Path
             summary_lines.append("  (none)")
         else:
             for _, operator_row in operator_counts.head(15).iterrows():
-                summary_lines.append(f"  {operator_row['operator']}: {int(operator_row['count'])}")
+                summary_lines.append(
+                    f"  {operator_row['operator']}: {int(operator_row['count'])}"
+                )
 
-        (case_output_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+        (case_output_dir / "summary.txt").write_text(
+            "\n".join(summary_lines) + "\n", encoding="utf-8"
+        )
 
         index_rows.append(
             {
@@ -537,12 +588,19 @@ def load_all_tables(table_files: list[Path]) -> pd.DataFrame:
 
 
 def build_status_counts(frame: pd.DataFrame) -> pd.DataFrame:
-    counts = frame["status"].value_counts(dropna=False).rename_axis("status").reset_index(name="count")
+    counts = (
+        frame["status"]
+        .value_counts(dropna=False)
+        .rename_axis("status")
+        .reset_index(name="count")
+    )
     counts["share_pct"] = counts["count"] / counts["count"].sum() * 100.0
     return counts
 
 
-def print_summary(frame: pd.DataFrame, status_counts: pd.DataFrame, table_files: list[Path]) -> None:
+def print_summary(
+    frame: pd.DataFrame, status_counts: pd.DataFrame, table_files: list[Path]
+) -> None:
     total_rows = len(frame)
     unique_statuses = int(status_counts.shape[0])
     successful_rows = int(frame["successful"].sum())
@@ -563,7 +621,12 @@ def plot_status_counts(status_counts: pd.DataFrame, output_dir: Path) -> None:
         other_count = int(status_counts.iloc[20:]["count"].sum())
         if other_count > 0:
             top_counts = pd.concat(
-                [top_counts, pd.DataFrame([["other", other_count, 0.0]], columns=top_counts.columns)],
+                [
+                    top_counts,
+                    pd.DataFrame(
+                        [["other", other_count, 0.0]], columns=top_counts.columns
+                    ),
+                ],
                 ignore_index=True,
             )
 
@@ -580,7 +643,9 @@ def plot_status_counts(status_counts: pd.DataFrame, output_dir: Path) -> None:
     plt.close(fig)
 
 
-def plot_metric_by_status(frame: pd.DataFrame, metric: str, ylabel: str, output_dir: Path) -> None:
+def plot_metric_by_status(
+    frame: pd.DataFrame, metric: str, ylabel: str, output_dir: Path
+) -> None:
     data = []
     labels = []
     for status in SUCCESS_STATUSES + ["other"]:
@@ -593,7 +658,9 @@ def plot_metric_by_status(frame: pd.DataFrame, metric: str, ylabel: str, output_
     fig, ax = plt.subplots(figsize=(10, 6))
     if data:
         try:
-            box = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
+            box = ax.boxplot(
+                data, tick_labels=labels, patch_artist=True, showfliers=False
+            )
         except TypeError:
             box = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
         for patch in box["boxes"]:
@@ -612,7 +679,9 @@ def plot_metric_by_status(frame: pd.DataFrame, metric: str, ylabel: str, output_
     plt.close(fig)
 
 
-def write_summary_files(frame: pd.DataFrame, status_counts: pd.DataFrame, output_dir: Path) -> None:
+def write_summary_files(
+    frame: pd.DataFrame, status_counts: pd.DataFrame, output_dir: Path
+) -> None:
     status_counts.to_csv(output_dir / "status_counts.csv", index=False)
 
     summary = pd.DataFrame(
@@ -621,7 +690,9 @@ def write_summary_files(frame: pd.DataFrame, status_counts: pd.DataFrame, output
                 "total_rows": len(frame),
                 "unique_statuses": int(status_counts.shape[0]),
                 "successful_rows": int(frame["successful"].sum()),
-                "successful_pct": frame["successful"].mean() * 100.0 if len(frame) else 0.0,
+                "successful_pct": frame["successful"].mean() * 100.0
+                if len(frame)
+                else 0.0,
                 "cpu_median_s": frame["cputime_s"].median(),
                 "walltime_median_s": frame["walltime_s"].median(),
                 "memory_median_mb": frame["memory_mb"].median(),
@@ -710,7 +781,9 @@ def main() -> int:
 
     # 2) Analysis per (prefix, equivalent/non-equivalent).
     by_prefix_kind_root = output_dir / "by_prefix_kind"
-    for (prefix, equiv_kind), group in frame.groupby(["prefix", "equiv_kind"], sort=True):
+    for (prefix, equiv_kind), group in frame.groupby(
+        ["prefix", "equiv_kind"], sort=True
+    ):
         jobs.append((group.copy(), by_prefix_kind_root / f"{prefix}_{equiv_kind}"))
 
     # 3) Combined analysis per prefix (equivalent + non-equivalent).

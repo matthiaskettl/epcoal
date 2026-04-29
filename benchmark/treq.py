@@ -54,5 +54,10 @@ class Tool(BaseTool2):
     def determine_result(self, run):
         for line in reversed(run.output):
             if "Final verdict:" in line:
-                return benchexec.result.RESULT_DONE + " (" + line.split("Final verdict:")[-1].strip() + ")"
+                return (
+                    benchexec.result.RESULT_DONE
+                    + " ("
+                    + line.split("Final verdict:")[-1].strip()
+                    + ")"
+                )
         return benchexec.result.RESULT_DONE + " (unfinished)"

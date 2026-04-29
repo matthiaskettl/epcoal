@@ -485,7 +485,7 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
             p += 1
 
         if p < n and content[p] == ";":
-            out.append(content[start:p + 1])
+            out.append(content[start : p + 1])
             i = p + 1
         else:
             # Insert semicolon immediately after ')', keep following whitespace/tokens as-is.
@@ -573,7 +573,7 @@ class ReachErrorTransformer(c_ast.NodeVisitor):
     def _create_abort_decl(self):
         """Create external declaration: void abort(void);"""
         return c_ast.Decl(
-            name='abort',
+            name="abort",
             quals=[],
             align=[],
             storage=[],
@@ -581,24 +581,23 @@ class ReachErrorTransformer(c_ast.NodeVisitor):
             type=c_ast.FuncDecl(
                 args=None,
                 type=c_ast.TypeDecl(
-                    declname='abort',
+                    declname="abort",
                     quals=[],
                     align=[],
-                    type=c_ast.IdentifierType(names=['void'])
-                )
+                    type=c_ast.IdentifierType(names=["void"]),
+                ),
             ),
             init=None,
-            bitsize=None
+            bitsize=None,
         )
 
     def visit_FuncCall(self, node):
         # Replace reach_error() calls with abort()
         if isinstance(node.name, c_ast.ID) and node.name.name == "reach_error":
             node.name = c_ast.ID(name="abort")
-        
+
         # Continue visiting children
         self.generic_visit(node)
-
 
 
 class GlobalizeTransformer(c_ast.NodeVisitor):
@@ -673,7 +672,7 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
 
         new_block_items = []
 
-        for stmt in (node.block_items or []):
+        for stmt in node.block_items or []:
             if isinstance(stmt, c_ast.Typedef):
                 # Hoist typedefs so globalized declarations that depend on them remain valid.
                 self._record_typedef(stmt)
@@ -743,9 +742,7 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                         self.visit(init)
                         new_block_items.append(
                             c_ast.Assignment(
-                                op='=',
-                                lvalue=c_ast.ID(name=new),
-                                rvalue=init
+                                op="=", lvalue=c_ast.ID(name=new), rvalue=init
                             )
                         )
 
@@ -846,9 +843,7 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
                         # Rewrite IDs in initializer based on the current scope mapping.
                         self.visit(init)
                         node.init = c_ast.Assignment(
-                            op='=',
-                            lvalue=c_ast.ID(name=new),
-                            rvalue=init
+                            op="=", lvalue=c_ast.ID(name=new), rvalue=init
                         )
                     else:
                         node.init = c_ast.EmptyStatement()
@@ -936,7 +931,9 @@ class GlobalizeTransformer(c_ast.NodeVisitor):
 
     def _requires_decl_initializer(self, decl_type):
         """Types whose initializers must stay on declaration."""
-        return self._is_struct_or_union_type(decl_type) or self._is_array_type(decl_type)
+        return self._is_struct_or_union_type(decl_type) or self._is_array_type(
+            decl_type
+        )
 
     def _contains_identifier(self, node):
         """Return True if subtree contains at least one identifier reference."""
@@ -1006,7 +1003,7 @@ class PrefixTransformer(c_ast.NodeVisitor):
 
     def visit_Compound(self, node):
         self.push_scope()
-        for stmt in (node.block_items or []):
+        for stmt in node.block_items or []:
             self.visit(stmt)
         self.pop_scope()
 
@@ -1045,7 +1042,9 @@ class PrefixTransformer(c_ast.NodeVisitor):
 
         if node.name is not None:
             if _is_func_decl_type(node.type):
-                node.name = self.function_names.get(node.name, self._prefixed(node.name))
+                node.name = self.function_names.get(
+                    node.name, self._prefixed(node.name)
+                )
                 self._rename_type(node.type, node.name)
             elif self.in_struct == 0:
                 # Rename VARIABLE DECLARATIONS only (e.g. "p" in "struct Point p;").
@@ -1129,7 +1128,7 @@ class Transformer:
         original_global_decls = []
         func_defs = []
         passthrough_nodes = []
-        
+
         for ext in self.ast.ext:
             # External function declarations (Decl with FuncDecl type)
             if _is_func_decl_node(ext):
@@ -1162,17 +1161,24 @@ class Transformer:
             )
 
         # Preserve source order as closely as possible for declarations.
-        ordered_decls = list(enumerate(external_func_decls + t.typedef_decls + original_global_decls + t.global_decls + passthrough_nodes))
+        ordered_decls = list(
+            enumerate(
+                external_func_decls
+                + t.typedef_decls
+                + original_global_decls
+                + t.global_decls
+                + passthrough_nodes
+            )
+        )
         ordered_decls.sort(key=lambda item: _coord_key(item[1], item[0]))
 
         # Reconstruct: declarations in source order, then function definitions.
-        self.ast.ext = (
-            [node for _, node in ordered_decls]
-            + func_defs
-        )
+        self.ast.ext = [node for _, node in ordered_decls] + func_defs
 
         if self.prefix:
-            prefix_transformer = PrefixTransformer(self.prefix, original_global_names=original_global_names)
+            prefix_transformer = PrefixTransformer(
+                self.prefix, original_global_names=original_global_names
+            )
             prefix_transformer.visit(self.ast)
 
         return self.ast
@@ -1183,7 +1189,7 @@ class Transformer:
             ast = self.ast
         generated = self.generator.visit(ast)
         return ensure_asm_volatile_semicolons(generated)
-    
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -1191,27 +1197,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Transform C programs by globalizing local variable declarations"
     )
-    parser.add_argument(
-        "input",
-        type=str,
-        help="Path to the input C program file"
-    )
+    parser.add_argument("input", type=str, help="Path to the input C program file")
     parser.add_argument(
         "output",
         type=str,
-        help="Path to the output file where the transformed program will be written"
+        help="Path to the output file where the transformed program will be written",
     )
     parser.add_argument(
         "--prefix",
         type=str,
         default="",
-        help="Prefix to prepend to every variable and function name"
+        help="Prefix to prepend to every variable and function name",
     )
-    
+
     args = parser.parse_args()
     input_path = Path(args.input)
     output_path = Path(args.output)
-    
+
     # Read the input C file
     try:
         code = input_path.read_text()
@@ -1221,7 +1223,7 @@ if __name__ == "__main__":
     except IOError as e:
         logger.error("Error reading input file %s: %s", input_path, e)
         sys.exit(1)
-    
+
     # Transform the code
     try:
         transformer = Transformer(code, prefix=args.prefix)
@@ -1230,7 +1232,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.exception("Error transforming code: %s", e)
         sys.exit(1)
-    
+
     # Write to output file
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)

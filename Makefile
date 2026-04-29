@@ -34,6 +34,10 @@ prepare-bench-defs:
 	@if [ ! -d benchmark/sv-benchmarks ]; then echo "Error: benchmark/sv-benchmarks not found"; exit 1; fi
 	find benchmark/ -maxdepth 1 -name "*_equivalent_mutants.csv" -exec ./benchmark/generate.py {} --cpu-model="${CPU_MODEL}" --output {}.xml \;
 
+prepare-bench-defs-tce:
+	@if [ ! -d benchmark/sv-benchmarks ]; then echo "Error: benchmark/sv-benchmarks not found"; exit 1; fi
+	find benchmark/ -maxdepth 1 -name "*_equivalent_mutants.csv" -exec ./benchmark/generate.py {} --cpu-model="${CPU_MODEL}" --template benchmark/template-tce.xml --tce --output {}.xml \;
+
 prepare-benchmarks: prepare-benchexec prepare-bench-defs
 
 analysis:

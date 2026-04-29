@@ -117,7 +117,7 @@ def ensure_asm_volatile_semicolons(content: str) -> str:
             p += 1
 
         if p < n and content[p] == ";":
-            out.append(content[start:p + 1])
+            out.append(content[start : p + 1])
             i = p + 1
         else:
             # Insert semicolon immediately after ')', keep following whitespace/tokens as-is.
@@ -204,7 +204,9 @@ class AssertionBuilder:
             return f"if((({lhs}) == 0) != (({rhs}) == 0)) {{ reach_error(); }}"
 
         if policy == "ignore-funcptr" and ptr_kind == "funcptr":
-            logger.warning("Ignoring function pointer comparison for `%s` due to policy", lhs)
+            logger.warning(
+                "Ignoring function pointer comparison for `%s` due to policy", lhs
+            )
             return ""
 
         return f"if({lhs} != {rhs}) {{ reach_error(); }}"
@@ -255,14 +257,19 @@ class AssertionBuilder:
 
         # If struct layout is not available, fallback to bytewise comparison.
         if not decls:
-            logger.warning("Struct layout unavailable for `%s`, using memcmp fallback", struct_node.name)
+            logger.warning(
+                "Struct layout unavailable for `%s`, using memcmp fallback",
+                struct_node.name,
+            )
             return self._build_memcmp_or_byte_loop_assert(lhs, rhs)
 
         checks = []
         needs_fallback = False
         for field in decls:
             if not isinstance(field, c_ast.Decl):
-                logger.warning("Skipping unsupported struct field node in `%s`", struct_node.name)
+                logger.warning(
+                    "Skipping unsupported struct field node in `%s`", struct_node.name
+                )
                 needs_fallback = True
                 continue
 
@@ -276,10 +283,17 @@ class AssertionBuilder:
                             continue
                         nested_lhs = f"({lhs}).{nested.name}"
                         nested_rhs = f"({rhs}).{nested.name}"
-                        checks.append(self._build_compare_assert(nested_lhs, nested_rhs, nested.type))
+                        checks.append(
+                            self._build_compare_assert(
+                                nested_lhs, nested_rhs, nested.type
+                            )
+                        )
                     continue
 
-                logger.warning("Skipping anonymous/unsupported struct field in `%s`", struct_node.name)
+                logger.warning(
+                    "Skipping anonymous/unsupported struct field in `%s`",
+                    struct_node.name,
+                )
                 needs_fallback = True
                 continue
 
@@ -434,7 +448,9 @@ class AssertionBuilder:
                 return "charptr"
             if self._resolves_to_primitive_scalar_type(target, seen_typedefs.copy()):
                 return "primptr"
-            if isinstance(target, c_ast.TypeDecl) and isinstance(target.type, c_ast.IdentifierType):
+            if isinstance(target, c_ast.TypeDecl) and isinstance(
+                target.type, c_ast.IdentifierType
+            ):
                 names = target.type.names
                 if len(names) == 1:
                     alias = names[0]
@@ -516,7 +532,9 @@ class AssertionBuilder:
                     if alias in seen_typedefs:
                         return False
                     seen_typedefs.add(alias)
-                    return self._resolves_to_primitive_scalar_type(target, seen_typedefs)
+                    return self._resolves_to_primitive_scalar_type(
+                        target, seen_typedefs
+                    )
 
             # Built-in scalar types; reject `void` and storage/type tags.
             if "void" in names or "struct" in names or "union" in names:
@@ -595,11 +613,11 @@ class NondetDetector:
         func_name = None
         if isinstance(init_node.name, c_ast.ID):
             func_name = init_node.name.name
-        
+
         if not func_name or not func_name.startswith("__VERIFIER_nondet_"):
             return False, None
 
-        nondet_type = func_name[len("__VERIFIER_nondet_"):]
+        nondet_type = func_name[len("__VERIFIER_nondet_") :]
         return True, nondet_type
 
     @staticmethod
@@ -633,10 +651,12 @@ class GlobalVariableExtractor(c_ast.NodeVisitor):
             if isinstance(ext, c_ast.Decl) and not _is_func_decl_type(ext.type):
                 if not ext.name:
                     # Anonymous declarations cannot be matched across files by name.
-                    logger.debug("Skipping anonymous global declaration during extraction")
+                    logger.debug(
+                        "Skipping anonymous global declaration during extraction"
+                    )
                     continue
                 self.global_vars[ext.name] = ext
-                
+
                 # Check if initialized with nondet call
                 if ext.init:
                     is_nondet, nondet_type = NondetDetector.is_nondet_call(ext.init)
@@ -654,12 +674,12 @@ class GlobalVariableExtractor(c_ast.NodeVisitor):
 
 class NondetCallReplacer(c_ast.NodeVisitor):
     """Replace __VERIFIER_nondet_X() calls in function bodies with pure function calls."""
-    
+
     def __init__(self, prefix1, prefix2):
         self.prefix1 = prefix1
         self.prefix2 = prefix2
         self.nondet_calls_found = []  # List of (nondet_type, var_name)
-    
+
     def visit_Assignment(self, node):
         """Check assignments and replace nondet calls with pure function calls."""
         # Handle assignment RHS first so we can derive pure function name from lvalue.
@@ -675,10 +695,14 @@ class NondetCallReplacer(c_ast.NodeVisitor):
                     pure_func_name = f"__pure_{base_name}"
                     func_id = c_ast.ID(pure_func_name)
                     # Create post-increment: __invocation_count++
-                    counter_postinc = c_ast.UnaryOp("p++", c_ast.ID("__invocation_count"))
+                    counter_postinc = c_ast.UnaryOp(
+                        "p++", c_ast.ID("__invocation_count")
+                    )
                     expr_list = c_ast.ExprList([counter_postinc])
                     node.rvalue = c_ast.FuncCall(func_id, expr_list)
-                    logger.debug(f"Replaced __VERIFIER_nondet call with __pure_{base_name}(__invocation_count++)")
+                    logger.debug(
+                        f"Replaced __VERIFIER_nondet call with __pure_{base_name}(__invocation_count++)"
+                    )
                     # Don't recurse into the replaced call.
                     self.visit(node.lvalue)
                     return
@@ -700,12 +724,14 @@ class NondetCallReplacer(c_ast.NodeVisitor):
         self.nondet_calls_found.append((nondet_type, base_name))
 
         node.name = c_ast.ID(f"__pure_{base_name}")
-        node.args = c_ast.ExprList([c_ast.UnaryOp("p++", c_ast.ID("__invocation_count"))])
+        node.args = c_ast.ExprList(
+            [c_ast.UnaryOp("p++", c_ast.ID("__invocation_count"))]
+        )
         logger.debug(
             "Replaced standalone __VERIFIER_nondet call with __pure_%s(__invocation_count++)",
             base_name,
         )
-    
+
     def _get_var_name(self, lvalue):
         """Extract a stable key from lvalue for naming pure nondet streams."""
         if isinstance(lvalue, c_ast.ID):
@@ -727,9 +753,9 @@ class NondetCallReplacer(c_ast.NodeVisitor):
         if not var_name:
             return None
         if var_name.startswith(self.prefix1):
-            var_name = var_name[len(self.prefix1):]
+            var_name = var_name[len(self.prefix1) :]
         if var_name.startswith(self.prefix2):
-            var_name = var_name[len(self.prefix2):]
+            var_name = var_name[len(self.prefix2) :]
 
         # Keep generated name a valid C identifier.
         var_name = re.sub(r"[^A-Za-z0-9_]", "_", var_name)
@@ -794,7 +820,9 @@ class TerminationCallReplacer(c_ast.NodeVisitor):
         else:
             return
 
-        logger.debug("Replaced terminating call `%s` with `%s()`", node.name.name, helper_name)
+        logger.debug(
+            "Replaced terminating call `%s` with `%s()`", node.name.name, helper_name
+        )
         node.name = c_ast.ID(helper_name)
         node.args = None
 
@@ -828,10 +856,12 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
             node.body.block_items.append(c_ast.FuncCall(c_ast.ID(helper_name), None))
 
     def _wrap_return(self, ret_stmt, helper_name):
-        return c_ast.Compound([
-            c_ast.FuncCall(c_ast.ID(helper_name), None),
-            ret_stmt,
-        ])
+        return c_ast.Compound(
+            [
+                c_ast.FuncCall(c_ast.ID(helper_name), None),
+                ret_stmt,
+            ]
+        )
 
     def _rewrite_stmt(self, stmt, helper_name):
         if stmt is None:
@@ -872,11 +902,15 @@ class MainExitInstrumenter(c_ast.NodeVisitor):
             return stmt
 
         if isinstance(stmt, c_ast.Case):
-            stmt.stmts = [self._rewrite_stmt(s, helper_name) for s in (stmt.stmts or [])]
+            stmt.stmts = [
+                self._rewrite_stmt(s, helper_name) for s in (stmt.stmts or [])
+            ]
             return stmt
 
         if isinstance(stmt, c_ast.Default):
-            stmt.stmts = [self._rewrite_stmt(s, helper_name) for s in (stmt.stmts or [])]
+            stmt.stmts = [
+                self._rewrite_stmt(s, helper_name) for s in (stmt.stmts or [])
+            ]
             return stmt
 
         return stmt
@@ -910,7 +944,9 @@ class Merger:
             logger.info("Using pre-parsed AST inputs for merge")
         else:
             if self.file1_path is None or self.file2_path is None:
-                raise ValueError("Either both ASTs or both input file paths must be provided")
+                raise ValueError(
+                    "Either both ASTs or both input file paths must be provided"
+                )
 
             parser = GnuCParser()
 
@@ -962,7 +998,7 @@ class Merger:
         if not isinstance(name, str):
             return name
         if prefix and isinstance(prefix, str) and name.startswith(prefix):
-            return name[len(prefix):]
+            return name[len(prefix) :]
         return name
 
     def merge(self):
@@ -987,8 +1023,12 @@ class Merger:
         globals2 = extractor2.global_vars
         nondet2 = extractor2.nondet_vars
 
-        logger.info(f"Found {len(globals1)} globals in file 1 ({len(nondet1)} with nondet)")
-        logger.info(f"Found {len(globals2)} globals in file 2 ({len(nondet2)} with nondet)")
+        logger.info(
+            f"Found {len(globals1)} globals in file 1 ({len(nondet1)} with nondet)"
+        )
+        logger.info(
+            f"Found {len(globals2)} globals in file 2 ({len(nondet2)} with nondet)"
+        )
 
         # Match globals by their base name (without prefix)
         var_pairs = self._match_globals(globals1, globals2)
@@ -1030,8 +1070,10 @@ class Merger:
         # Replace all __VERIFIER_nondet_X() calls in function bodies with pure function calls
         replacer = NondetCallReplacer(self.prefix1, self.prefix2)
         replacer.visit(merged_ast_temp)
-        logger.info(f"Found and replaced {len(replacer.nondet_calls_found)} __VERIFIER_nondet calls in function bodies")
-        
+        logger.info(
+            f"Found and replaced {len(replacer.nondet_calls_found)} __VERIFIER_nondet calls in function bodies"
+        )
+
         # Remove initializers from matched nondet globals to avoid duplicate calls
         self._remove_nondet_initializers(merged_ext, nondet_pairs)
 
@@ -1041,14 +1083,18 @@ class Merger:
         struct_defs = self._collect_struct_definitions(merged_ast_temp)
         union_defs = self._collect_union_definitions(merged_ast_temp)
         typedef_defs = self._collect_typedef_definitions(merged_ast_temp)
-        check_code = self._build_assertions(var_pairs, struct_defs, union_defs, typedef_defs)
+        check_code = self._build_assertions(
+            var_pairs, struct_defs, union_defs, typedef_defs
+        )
 
         # Some fallback equality checks use memcmp; ensure a declaration exists.
         self._add_memcmp_decl_if_needed(merged_ext, check_code)
         self._add_strcmp_decl_if_needed(merged_ext, check_code)
 
         # Create external declarations for pure functions from both global nondet vars and function body calls
-        self._add_pure_function_declarations_all(merged_ext, nondet_pairs, replacer.nondet_calls_found)
+        self._add_pure_function_declarations_all(
+            merged_ext, nondet_pairs, replacer.nondet_calls_found
+        )
 
         # Add the shared global invocation counter used by pure function calls
         self._add_invocation_counter_global(merged_ext)
@@ -1116,7 +1162,9 @@ class Merger:
             if isinstance(ext, c_ast.Decl) and _is_func_decl_type(ext.type):
                 sig = _normalize_decl_text(self.generator.visit(ext))
                 if sig in seen_external_signatures:
-                    logger.debug(f"Skipped duplicate external function signature: {ext.name}")
+                    logger.debug(
+                        f"Skipped duplicate external function signature: {ext.name}"
+                    )
                     continue
                 seen_external_signatures.add(sig)
                 ordered_decls.append(ext)
@@ -1135,7 +1183,9 @@ class Merger:
                 fname = ext.decl.name
                 sig = _normalize_decl_text(self.generator.visit(ext.decl))
                 if sig in seen_funcdef_signatures:
-                    logger.debug(f"Skipped duplicate function definition signature: {fname}")
+                    logger.debug(
+                        f"Skipped duplicate function definition signature: {fname}"
+                    )
                     continue
                 seen_funcdef_signatures.add(sig)
                 if fname not in func_defs_by_name:
@@ -1143,7 +1193,9 @@ class Merger:
                     func_defs_order.append(ext)
                     logger.debug(f"Added function definition: {fname}")
                 else:
-                    logger.debug(f"Skipped duplicate function definition by name: {fname}")
+                    logger.debug(
+                        f"Skipped duplicate function definition by name: {fname}"
+                    )
             else:
                 ordered_decls.append(ext)
 
@@ -1167,7 +1219,11 @@ class Merger:
         pre_decls = []
         named_globals = []
         for decl in ordered_decls:
-            if isinstance(decl, c_ast.Decl) and not _is_func_decl_type(decl.type) and decl.name is not None:
+            if (
+                isinstance(decl, c_ast.Decl)
+                and not _is_func_decl_type(decl.type)
+                and decl.name is not None
+            ):
                 named_globals.append(decl)
             else:
                 pre_decls.append(decl)
@@ -1181,7 +1237,6 @@ class Merger:
         )
         return result
 
-
     def _match_nondet(self, nondet1, nondet2, var_pairs):
         """
         Match nondet variables between the two files.
@@ -1193,7 +1248,7 @@ class Merger:
             if var1 in nondet1 and var2 in nondet2:
                 nondet_type1 = nondet1[var1]
                 nondet_type2 = nondet2[var2]
-                
+
                 # Only match if same nondet type
                 if nondet_type1 == nondet_type2:
                     nondet_pairs.append((nondet_type1, var1, var2))
@@ -1247,7 +1302,9 @@ class Merger:
                 ", ".join(unmatched_left),
             )
 
-        unmatched_right = [name for name in globals2.keys() if name not in matched_right]
+        unmatched_right = [
+            name for name in globals2.keys() if name not in matched_right
+        ]
         if unmatched_right:
             logger.info(
                 "No matching candidate in first file for %d globals (skipping): %s",
@@ -1275,7 +1332,9 @@ class Merger:
         collector.visit(root)
         return collector.typedef_defs
 
-    def _build_assertions(self, var_pairs, struct_defs=None, union_defs=None, typedef_defs=None):
+    def _build_assertions(
+        self, var_pairs, struct_defs=None, union_defs=None, typedef_defs=None
+    ):
         """Build equality check statements for matched variable pairs."""
         builder = AssertionBuilder(
             self.prefix1,
@@ -1318,10 +1377,14 @@ class Merger:
                 base_name = self._strip_prefix(var1, self.prefix1)
                 pure_func_name = f"__pure_{base_name}"
                 # Call pure function with post-increment counter for both variables
-                pure_assignments.append(f"{var1} = {pure_func_name}(__invocation_count++);")
-                pure_assignments.append(f"{var2} = {pure_func_name}(__invocation_count++);")
+                pure_assignments.append(
+                    f"{var1} = {pure_func_name}(__invocation_count++);"
+                )
+                pure_assignments.append(
+                    f"{var2} = {pure_func_name}(__invocation_count++);"
+                )
 
-        pure_code_str = '\n'.join(pure_assignments)
+        pure_code_str = "\n".join(pure_assignments)
 
         # Build the main function body as C code, then parse it
         main_code = f"""
@@ -1342,9 +1405,11 @@ class Merger:
             logger.warning(f"Main code was: {main_code}")
             raise
 
-    def _add_pure_function_declarations_all(self, ext_list, nondet_pairs, function_body_nondet_calls):
+    def _add_pure_function_declarations_all(
+        self, ext_list, nondet_pairs, function_body_nondet_calls
+    ):
         """Add extern declarations for pure functions from both global nondet vars and function body calls.
-        
+
         Args:
             ext_list: List of external declarations (FileAST.ext)
             nondet_pairs: List of (nondet_type, var1, var2) tuples for global vars
@@ -1352,24 +1417,26 @@ class Merger:
         """
         # Track seen base names to avoid duplicate declarations
         seen_bases = {}  # base_name -> nondet_type
-        
+
         # Process global nondet pairs
         for nondet_type, var1, var2 in nondet_pairs:
             # Extract base name from var1 (strip prefix)
             base_name = self._strip_prefix(var1, self.prefix1)
             seen_bases[base_name] = nondet_type
-        
+
         # Process function body nondet calls (these use the full variable name directly)
         for nondet_type, var_name in function_body_nondet_calls:
             if var_name not in seen_bases:
                 seen_bases[var_name] = nondet_type
             else:
-                logger.debug(f"Pure function `__pure_{var_name}` already registered as global")
-        
+                logger.debug(
+                    f"Pure function `__pure_{var_name}` already registered as global"
+                )
+
         if not seen_bases:
             logger.debug("No pure functions needed, skipping declarations")
             return
-        
+
         # Track existing pure declarations to avoid adding duplicates.
         existing_pure_names = set()
         for ext in ext_list:
@@ -1386,7 +1453,7 @@ class Merger:
         for base_name, nondet_type in seen_bases.items():
             # Get the C type string for this nondet type
             type_str = NondetDetector.get_nondet_type_str(nondet_type)
-            
+
             # Create extern declaration: extern <type> __pure_<base_name>(int count);
             pure_name = f"__pure_{base_name}"
             if pure_name in existing_pure_names:
@@ -1394,15 +1461,19 @@ class Merger:
                 continue
 
             decl_code = f"extern {type_str} {pure_name}(int count);"
-            
+
             try:
                 parsed = parser.parse(decl_code)
                 func_decl = parsed.ext[0]
                 ext_list.insert(0, func_decl)
                 existing_pure_names.add(pure_name)
-                logger.info(f"Added pure function declaration for `{pure_name}`: {decl_code}")
+                logger.info(
+                    f"Added pure function declaration for `{pure_name}`: {decl_code}"
+                )
             except Exception as e:
-                logger.error(f"Error parsing pure function declaration '{decl_code}': {e}")
+                logger.error(
+                    f"Error parsing pure function declaration '{decl_code}': {e}"
+                )
                 raise
 
     def _add_invocation_counter_global(self, ext_list):
@@ -1415,7 +1486,9 @@ class Merger:
         parsed = parser.parse("int __invocation_count;")
         counter_decl = parsed.ext[0]
         ext_list.insert(0, counter_decl)
-        logger.info("Added global invocation counter declaration: int __invocation_count;")
+        logger.info(
+            "Added global invocation counter declaration: int __invocation_count;"
+        )
 
     def _remove_verifier_nondet_declarations(self, ext_list):
         """Drop stale extern declarations of __VERIFIER_nondet_* after call replacement."""
@@ -1466,12 +1539,18 @@ class Merger:
             return
 
         for ext in ext_list:
-            if isinstance(ext, c_ast.Decl) and _is_func_decl_type(ext.type) and ext.name == "memcmp":
+            if (
+                isinstance(ext, c_ast.Decl)
+                and _is_func_decl_type(ext.type)
+                and ext.name == "memcmp"
+            ):
                 return
 
         parser = GnuCParser()
         # Use unsigned long for size to avoid dependency on typedef size_t ordering.
-        decl_code = "extern int memcmp(const void *lhs, const void *rhs, unsigned long n);"
+        decl_code = (
+            "extern int memcmp(const void *lhs, const void *rhs, unsigned long n);"
+        )
         parsed = parser.parse(decl_code)
         ext_list.insert(0, parsed.ext[0])
         logger.info("Added external declaration for memcmp")
@@ -1482,7 +1561,11 @@ class Merger:
             return
 
         for ext in ext_list:
-            if isinstance(ext, c_ast.Decl) and _is_func_decl_type(ext.type) and ext.name == "strcmp":
+            if (
+                isinstance(ext, c_ast.Decl)
+                and _is_func_decl_type(ext.type)
+                and ext.name == "strcmp"
+            ):
                 return
 
         parser = GnuCParser()
@@ -1514,9 +1597,7 @@ class Merger:
         """Add original-side exit handler."""
 
         existing_funcs = {
-            ext.decl.name
-            for ext in ext_list
-            if isinstance(ext, c_ast.FuncDef)
+            ext.decl.name for ext in ext_list if isinstance(ext, c_ast.FuncDef)
         }
 
         parser = GnuCParser()
@@ -1551,7 +1632,10 @@ class Merger:
                 prev_target_name = None
                 for stmt in items:
                     current_target_name = _target_call_name(stmt)
-                    if current_target_name is not None and current_target_name == prev_target_name:
+                    if (
+                        current_target_name is not None
+                        and current_target_name == prev_target_name
+                    ):
                         continue
                     deduped.append(stmt)
                     prev_target_name = current_target_name

@@ -32,11 +32,7 @@ class Tool(BaseTool2):
         return "TCE"
 
     def cmdline(self, executable, options, task, rlimits):
-        return (
-            [executable]
-            + options
-            + list(task.input_files_or_identifier)
-        )
+        return [executable] + options + list(task.input_files_or_identifier)
 
     def determine_result(self, run):
         for line in reversed(run.output):
