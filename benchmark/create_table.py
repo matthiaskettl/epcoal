@@ -13,7 +13,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-RESULTS_PATTERN = "*_1000_*equivalent_mutants.csv.*.mutant_*.xml.bz2"
+RESULTS_PATTERN = "*_*_*equivalent_mutants.csv.*.mutant_*.xml.bz2"
 LATEST_RESULT_RE = re.compile(
     r"^(?P<prefix>.+?)_1000_(?P<kind>non_)?equivalent_mutants\.csv\.(?P<stamp>.+?)\.mutant_(?P<mutant>\d+)\.xml\.bz2$"
 )
