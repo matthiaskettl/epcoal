@@ -13,13 +13,13 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-RESULTS_PATTERN = "*_*_*equivalent_mutants.csv.*.mutant_*.xml.bz2"
+RESULTS_PATTERN = "*equivalent_mutants.csv.*.mutant_*.xml.bz2"
 LATEST_RESULT_RE = re.compile(
-    r"^(?P<prefix>.+?)_1000_(?P<kind>non_)?equivalent_mutants\.csv\.(?P<stamp>.+?)\.mutant_(?P<mutant>\d+)\.xml\.bz2$"
+    r"^(?P<prefix>.+?)_(?P<num>\d+)_(?P<kind>non_)?equivalent_mutants\.csv\.(?P<stamp>.+?)\.mutant_(?P<mutant>\d+)\.xml\.bz2$"
 )
 
 
-def find_mutant_files(pattern="**/cor_1000_*mutants.csv.*.results.mutant_*.xml.bz2"):
+def find_mutant_files(pattern="**/*_*mutants.csv.*.results.mutant_*.xml.bz2"):
     """Find all mutant result files matching the pattern."""
     files = glob.glob(pattern, recursive=True)
 
@@ -59,14 +59,14 @@ def find_latest_jobs(results_dir):
 
     latest_jobs = []
     for (prefix, kind), (stamp, entry) in sorted(latest_by_prefix.items()):
-        if len(entry["mutants"]) != 1000:
+        if len(entry["mutants"]) not in (50, 1000):
             print(
-                f"Warning: latest set for {prefix} {kind or 'equivalent'} has {len(entry['mutants'])} mutants, expected 1000"
+                f"Warning: latest set for {prefix} {kind or 'equivalent'} has {len(entry['mutants'])} mutants, expected 50 or 1000"
             )
 
         pattern = str(
             Path(results_dir)
-            / f"{prefix}_1000_{kind}equivalent_mutants.csv.{stamp}.mutant_*.xml.bz2"
+            / f"{prefix}_*_{kind}equivalent_mutants.csv.{stamp}.mutant_*.xml.bz2"
         )
         output_file = str(Path(__file__).parent / f"{prefix}_{kind}equivalent.xml")
         latest_jobs.append((pattern, output_file))
@@ -195,7 +195,7 @@ def main():
     )
     parser.add_argument(
         "--pattern",
-        default="cor_1000_*mutants.csv.*.results.mutant_*.xml.bz2",
+        default="cor_*_*mutants.csv.*.results.mutant_*.xml.bz2",
         help="Glob pattern for mutant result files (default: %(default)s)",
     )
     parser.add_argument(
